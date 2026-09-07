@@ -127,8 +127,26 @@ class CamoFoxProvider(BrowserProvider):
 
     async def open_page(self, session, url):
         url = await validate_destination(url)
-        data = await self._request("POST", "/tabs", body={
-            "userId": session.user_id, "sessionKey": session.session_key, "url": url, "trace": False})
+        # Let the bounded, non-replayed creation request settle before worker
+        # teardown. Deleting its context mid-POST makes CamoFox's new-page
+        # recovery recreate that context after DELETE has already succeeded.
+        request = asyncio.create_task(self._request("POST", "/tabs", body={
+            "userId": session.user_id, "sessionKey": session.session_key, "url": url, "trace": False}))
+        cancelled = False
+        while True:
+            try:
+                data = await asyncio.shield(request)
+                break
+            except asyncio.CancelledError:
+                if request.cancelled():
+                    raise
+                cancelled = True  # Also tolerate repeated shutdown cancellation.
+            except BrowserError:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise
+        if cancelled:
+            raise asyncio.CancelledError
         tab_id = data.get("tabId")
         if not isinstance(tab_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", tab_id):
             raise BrowserError("browser_protocol_error")

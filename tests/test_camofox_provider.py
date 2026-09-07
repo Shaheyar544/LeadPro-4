@@ -15,9 +15,18 @@ class CamoFoxContractTests(unittest.IsolatedAsyncioTestCase):
         self.failure = None
         self.redirect = None
         self.malformed = False
+        self.create_started = None
+        self.create_gate = None
+        self.active_contexts = set()
         async def handle(request):
             body = await request.json() if request.can_read_body else None
             self.calls.append((request.method, request.path, dict(request.query), request.headers.get("Authorization"), body))
+            if request.method == "POST" and request.path == "/tabs" and self.create_started:
+                self.create_started.set()
+                await self.create_gate.wait()
+                self.active_contexts.add(body["userId"])
+            if request.method == "DELETE" and request.path.startswith("/sessions/"):
+                self.active_contexts.discard(request.path.rsplit("/", 1)[-1])
             if self.failure:
                 return web.json_response({"error": "SECRET do not expose"}, status=self.failure)
             if self.malformed:
@@ -108,6 +117,46 @@ class CamoFoxContractTests(unittest.IsolatedAsyncioTestCase):
             health = await self.provider.health()
             self.assertFalse(health.available)
             self.assertEqual(health.status, "browser_timeout")
+
+    async def test_cancel_during_tab_creation_finishes_request_before_cleanup(self):
+        # Real CamoFox can recreate a context if DELETE races its in-flight POST.
+        self.create_started, self.create_gate = asyncio.Event(), asyncio.Event()
+        session = await self.provider.open_session()
+        async def audit():
+            try:
+                await self.provider.open_page(session, "https://business.test/")
+            finally:
+                await self.provider.close_session(session)
+        task = asyncio.create_task(audit())
+        await asyncio.wait_for(self.create_started.wait(), 1)
+        try:
+            task.cancel()
+            await asyncio.sleep(0.03)
+            task.cancel()  # Worker shutdown/gather can deliver cancellation twice.
+            await asyncio.sleep(0.03)
+            self.assertFalse(task.done())
+            self.assertFalse(any(call[0] == "DELETE" for call in self.calls))
+        finally:
+            self.create_gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        self.assertFalse(self.active_contexts)
+        self.assertEqual(sum(call[0] == "POST" for call in self.calls), 1)
+
+    async def test_cancelled_tab_creation_error_still_propagates_cancellation(self):
+        self.create_started, self.create_gate = asyncio.Event(), asyncio.Event()
+        session = await self.provider.open_session()
+        task = asyncio.create_task(self.provider.open_page(session, "https://business.test/"))
+        await asyncio.wait_for(self.create_started.wait(), 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.failure = 500
+        self.create_gate.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        self.failure = None
+        await self.provider.close_session(session)
+        self.assertFalse(self.active_contexts)
 
     def test_admin_only_service_configuration(self):
         self.assertEqual(service_url("http://127.0.0.1:9377", ""), "http://127.0.0.1:9377")

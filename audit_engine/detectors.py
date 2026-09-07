@@ -4,7 +4,7 @@ from urllib.parse import urlsplit, unquote, urljoin
 from engine_store import now, uid, domain
 from url_safety import normalize_url, UnsafeURL
 
-VERSION = "rendered_dom_v1"
+VERSION = "rendered_dom_v1.1"
 KEYS = (
     "reachable", "final_url", "https", "title", "viewport_meta", "rendered_page_status",
     "email", "phone", "mailto", "tel", "contact_page", "facebook", "instagram", "linkedin", "youtube",
@@ -114,6 +114,10 @@ def social_url(href, platform):
             return None
         if platform == "linkedin" and not re.match(r"^company/[^/]+", path):
             return None
+        # A linked video is not a business channel/profile. This also excludes
+        # youtu.be short links while retaining the supported channel URL forms.
+        if platform == "youtube" and (host != "youtube.com" or not re.fullmatch(r"(?:@[^/]+|(?:channel|c|user)/[^/]+)(?:/(?:videos|featured|about))?", path)):
+            return None
         return url
     except (UnsafeURL, ValueError):
         return None
@@ -128,10 +132,12 @@ def detect(facts, page):
                                page_type=page_type, page_id=page["id"], excerpt=excerpt,
                                locator=locator, confidence=confidence))
     contacts = public_contacts(facts, url)
-    add("reachable", True); add("final_url", url); add("https", url.startswith("https:"))
+    add("reachable", True, locator="document.readyState / location.href")
+    add("final_url", url, locator="location.href")
+    add("https", url.startswith("https:"), locator="location.protocol")
     add("title", facts.get("title"), locator="title")
     add("viewport_meta", facts.get("viewport"), locator='meta[name="viewport"]')
-    add("rendered_page_status", facts.get("ready_state"), status="present" if facts.get("ready_state") == "complete" else "unknown")
+    add("rendered_page_status", facts.get("ready_state"), status="present" if facts.get("ready_state") == "complete" else "unknown", locator="document.readyState")
     for kind in ("email", "phone"):
         found = [c for c in contacts if c["type"] == kind]
         if not found:
@@ -139,13 +145,17 @@ def detect(facts, page):
         for c in found:
             add(kind, c["normalized"], excerpt=c["excerpt"], locator=c["locator"], confidence=c["confidence"])
     for key in ("mailto", "tel"):
-        add(key, [c["normalized"] for c in contacts if c["evidence_type"] == key])
+        add(key, [c["normalized"] for c in contacts if c["evidence_type"] == key], locator=f'a[href^="{key}:"]')
     links = facts.get("links", [])
     contact_pages = [u for u, t in selected_links(links, url, 3) if t == "contact"]
-    add("contact_page", url if page_type == "contact" else contact_pages[0] if contact_pages else None)
+    contact_url = url if page_type == "contact" else contact_pages[0] if contact_pages else None
+    add("contact_page", contact_url, locator="location.href (contact page)" if page_type == "contact" else "a[href]",
+        excerpt=contact_url or "")
     for platform in ("facebook", "instagram", "linkedin", "youtube"):
-        found = sorted({value for link in links if (value := social_url(link.get("href", ""), platform))})
-        add(platform, found)
+        matches = {value: link for link in links if (value := social_url(link.get("href", ""), platform))}
+        found = sorted(matches)
+        link = matches[found[0]] if found else {}
+        add(platform, found, locator=link.get("locator") or "a[href]", excerpt=link.get("text") or (found[0] if found else ""))
     form_matches = {"contact_form": [], "quote_form": [], "booking_form": []}
     for form in facts.get("forms", [])[:30]:
         fields = form.get("fields", [])
@@ -165,25 +175,38 @@ def detect(facts, page):
             form_matches["contact_form"].append(form)
     for key, forms in form_matches.items():
         form = forms[0] if forms else {}
-        add(key, True if forms else None, excerpt=form.get("text", ""), locator=form.get("locator", ""))
+        # Preserve the heading that actually explains a scheduling/quote match;
+        # label-free forms still have a useful field/placeholder description.
+        excerpt = " ".join(str(form.get(k) or "") for k in ("heading", "text")).strip()
+        if forms and not excerpt:
+            excerpt = " ".join(str(f.get("label") or f.get("placeholder") or f.get("name") or f.get("type") or "") for f in form.get("fields", []))
+        add(key, True if forms else None, excerpt=excerpt, locator=form.get("locator") or "form")
     patterns = {"click_to_call": r"^tel:", "request_quote_cta": r"\b(?:quote|estimate)\b", "booking_cta": r"\b(?:book|schedule|appointment|reserve)\b", "contact_cta": r"\b(?:contact|call|email|talk to|send message)\b"}
     actionable = []
     for key, pattern in patterns.items():
-        found = [c for c in facts.get("ctas", []) if re.search(pattern, c.get("href", "") if key == "click_to_call" else c.get("text", ""), re.I)]
+        found = [c for c in facts.get("ctas", []) if re.search(pattern, c.get("href", "") if key == "click_to_call" else c.get("text", ""), re.I)
+                 or (key == "contact_cta" and ((c.get("href", "").startswith("tel:") and phone_number(c["href"]))
+                                               or (c.get("href", "").startswith("mailto:") and email_address(c["href"]))))]
         if found:
             actionable.extend(found)
         cta = found[0] if found else {}
-        add(key, cta.get("text") or cta.get("href"), excerpt=cta.get("text", ""), locator=cta.get("locator", ""))
+        add(key, cta.get("text") or cta.get("href"), excerpt=cta.get("text") or cta.get("href", ""), locator=cta.get("locator") or "a,button,input[type=submit]")
     cta = actionable[0] if actionable else {}
     add("primary_cta", cta.get("text") or cta.get("href"), excerpt=cta.get("text", ""), locator=cta.get("locator", ""), confidence=0.8)
     resources = " ".join(facts.get("resources", [])).lower()
-    signatures = {"booking_widget": r"calendly\.com|acuityscheduling\.com|squareup\.com/appointments|booksy\.com|setmore\.com|simplybook\.", "chat_widget": r"tawk\.to|intercom(?:cdn)?\.com|crisp\.chat|drift\.com|tidio\.(?:co|com)|livechatinc\.com|zopim\.com"}
+    signatures = {"booking_widget": r"calendly\.com|acuityscheduling\.com|squareup\.com/appointments|booksy\.com|setmore\.com|simplybook\.", "chat_widget": r"tawk\.to|intercom(?:cdn)?\.com|crisp\.chat|drift\.com|tidio\.(?:co|com)|livechatinc\.com|zopim\.com|https://webchat\.birdeye\.com/"}
     for key, pattern in signatures.items():
         match = re.search(pattern, resources)
         add(key, match[0] if match else None, status="present" if match else "unknown", locator="rendered resource URL", confidence=0.85)
     cms = resources + " " + facts.get("generator", "").lower()
-    match = next((name for name, pattern in {"WordPress": r"wp-content|wp-includes|wordpress", "Wix": r"wixstatic|wix\.com", "Squarespace": r"squarespace", "Shopify": r"cdn\.shopify|shopify"}.items() if re.search(pattern, cms)), None)
-    add("cms", match, status="present" if match else "unknown", locator="generator / rendered resource URL")
+    cms_patterns = {"WordPress": r"wp-content|wp-includes|wordpress", "Wix": r"wixstatic|wix\.com", "Squarespace": r"squarespace", "Shopify": r"cdn\.shopify|shopify"}
+    match = next((name for name, pattern in cms_patterns.items() if re.search(pattern, cms)), None)
+    hint = ""
+    if match:
+        hint = next((resource.split("?", 1)[0] for resource in facts.get("resources", []) if re.search(cms_patterns[match], resource, re.I)), facts.get("generator", ""))
+    elif re.match(r"^Framer(?:\s|$)", facts.get("generator", ""), re.I):
+        match, hint = "Framer", facts["generator"]
+    add("cms", match, status="present" if match else "unknown", locator="generator / rendered resource URL", excerpt=hint)
     for key, flag, pattern in (("google_analytics", "ga", r"google-analytics\.com|googletagmanager\.com/gtag/js"), ("google_tag_manager", "gtm", r"googletagmanager\.com/gtm\.js"), ("meta_pixel", "meta_pixel", r"connect\.facebook\.net/.*/fbevents\.js")):
         found = bool(facts.get("tracking", {}).get(flag) or re.search(pattern, resources))
         add(key, True if found else None, status="present" if found else "unknown", locator="rendered script signature")

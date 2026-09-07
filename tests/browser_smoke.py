@@ -123,7 +123,18 @@ def main():
                     page.locator('#cancel-job:not([disabled])').wait_for()
                     page.get_by_role('button', name='Cancel job', exact=True).click()
                     page.wait_for_function("() => document.getElementById('job-state').textContent.includes('cancelled')", timeout=30000)
+                    # Cancellation survives a full page reload; selecting its
+                    # saved history entry must reconnect without starting work.
+                    searches_before_reload = sum(url.endswith('/api/leadgen/start') for url in requests)
+                    page.reload()
+                    page.locator('#layout').wait_for(state='visible')
+                    page.get_by_role('button', name='Lead Generation', exact=True).click()
+                    page.locator('#recent-jobs button').filter(has_text='cancelled').first.click()
+                    page.wait_for_function("() => document.getElementById('job-state').textContent.includes('cancelled')")
+                    assert page.locator('#cancel-job').is_disabled()
+                    assert sum(url.endswith('/api/leadgen/start') for url in requests) == searches_before_reload
                     page.locator('#category').fill('Offline')
+                    page.locator('#city').fill('Austin'); page.locator('#state').fill('TX')
                     page.locator('#target_count').fill('1')
                     page.get_by_role('button', name='Start search', exact=True).click()
                     page.wait_for_function("() => document.getElementById('job-state').textContent.includes('Offline') && document.getElementById('job-state').textContent.includes('partial')", timeout=30000)

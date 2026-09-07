@@ -16,6 +16,58 @@ from tests.engine_fixtures import facts, business
 
 
 class DetectorTests(unittest.TestCase):
+    def test_phone_only_contact_action_does_not_inflate_gap(self):
+        f = facts(ctas=[{'text': '(512) 555-1234', 'href': 'tel:5125551234', 'locator': 'a#phone'}])
+        page = dict(id='page', final_url=f['url'], page_type='homepage', status='completed')
+        rows, contacts = detect(f, page)
+        audit = dict(status='completed', pages=[page], contacts=contacts, evidence=rows)
+        finding = aggregate(rows, True)
+        self.assertEqual(finding['contact_cta']['status'], 'present')
+        score = score_audit(business(), audit)
+        component = next(c for c in score['breakdown']['components'] if c['detector_key']=='contact_cta')
+        self.assertEqual(component['gap_points'], 0)
+        for href in ['mailto:office@realbusiness.com', 'tel:5125551234']:
+            rows, _ = detect(facts(ctas=[{'text':'', 'href':href}]), page)
+            self.assertEqual(aggregate(rows, True)['contact_cta']['status'], 'present')
+        rows, _ = detect(facts(ctas=[{'text':'', 'href':'mailto:example@example.com'}]), page)
+        self.assertEqual(aggregate(rows, True)['contact_cta']['status'], 'absent')
+
+    def test_profile_evidence_excludes_video_links_and_retains_traceable_sources(self):
+        f = facts(links=[{'href':'https://www.youtube.com/@business', 'text':'', 'locator':'a#channel'},
+                         {'href':'https://www.youtube.com/watch?v=123', 'text':'Watch our video'},
+                         {'href':'https://linkedin.com/in/person', 'text':'Person'}],
+                  contacts=[{'type':'phone','kind':'tel','value':'tel:5125551234','locator':'a#phone'}])
+        rows, _ = detect(f, dict(id='p', final_url=f['url'], page_type='homepage'))
+        self.assertEqual(aggregate(rows, True)['youtube']['value'], ['https://www.youtube.com/@business'])
+        for row in rows:
+            if row['status']=='present':
+                self.assertTrue(row['locator'] or row['excerpt'], row['detector_key'])
+                self.assertEqual(row['detector_version'], 'rendered_dom_v1.1')
+        for href in ['https://youtu.be/video', 'https://youtu.be/@business', 'https://youtube.com/watch?v=123', 'https://youtube.com/shorts/123']:
+            self.assertIsNone(social_url(href, 'youtube'))
+        self.assertEqual(social_url('https://youtube.com/channel/UCbusiness', 'youtube'), 'https://youtube.com/channel/UCbusiness')
+
+    def test_scheduling_heading_is_retained_as_classification_evidence(self):
+        f = facts(forms=[{'heading':'Schedule a free inspection', 'text':'Name Email Message Submit',
+                          'fields':[{'type':'email'}, {'tag':'textarea'}], 'locator':'form#inspection'}])
+        rows, _ = detect(f, dict(id='p', final_url=f['url'], page_type='homepage'))
+        booking = next(e for e in rows if e['detector_key']=='booking_form')
+        self.assertEqual(booking['status'], 'present')
+        self.assertIn('Schedule a free inspection', booking['excerpt'])
+        self.assertEqual(booking['locator'], 'form#inspection')
+
+    def test_observed_birdeye_chat_and_explicit_framer_generator(self):
+        page = dict(id='p', final_url='https://business.test/', page_type='homepage')
+        rows, _ = detect(facts(generator='Framer abc123', resources=['https://webchat.birdeye.com/getBubbleContent']), page)
+        findings = aggregate(rows, True)
+        self.assertEqual(findings['chat_widget']['status'], 'present')
+        self.assertEqual(findings['cms']['value'], 'Framer')
+        self.assertIn('Framer abc123', next(e for e in rows if e['detector_key']=='cms')['excerpt'])
+        rows, _ = detect(facts(generator='Unknown website builder', resources=['https://webchat.birdeye.com.evil.test/not-chat', 'https://site.test/framer-logo.png']), page)
+        findings = aggregate(rows, True)
+        self.assertEqual(findings['chat_widget']['status'], 'unknown')
+        self.assertEqual(findings['cms']['status'], 'unknown')
+
     def test_contact_normalization_and_false_positives(self):
         self.assertEqual(email_address("mailto:Office@realbusiness.com?subject=Hello"), "office@realbusiness.com")
         for value in ["photo@2x.png", "person@example.com", "bad@domain.com", "hidden source map", "test@validbusiness.com"]:

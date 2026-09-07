@@ -7,15 +7,18 @@ in Lead Engine. The primary adapter is `browser/camofox.py`; test injection uses
 
 ## Verified baseline
 
-- Official package version: **1.14.0**, Node **>=22** (Node 25.2.1 was available
-  during implementation; no live service was started).
+- Official package version: **1.14.0**, Node **>=22**. Phase 3B.1 validated the
+  real service on Windows using **Node 22.23.2**, **npm 11.6.3** and the existing
+  Visual Studio 2026 C++ Build Tools. No global Node/npm installation was changed.
 - Exact source contract pin: **e5a36f5cd0332fde6597de474329a308a53a0716**.
   This is a source revision whose package declares 1.14.0, later than the v1.14.0
   tag. Use this exact revision: do not substitute a moving branch, `latest`, or
   assume the npm tarball has the same post-release REST behavior.
-- Contract verified from the pinned `server.js`, `openapi.json`, `lib/config.js`,
-  `lib/auth.js`, `lib/plugins.js` and package metadata. Mock HTTP tests exercise
-  that contract. **This is not a claim that a live CamoFox deployment was tested.**
+- Contract verified from the pinned source and exercised against the real service
+  on **2026-09-08 (Asia/Karachi)**. The official `camoufox-js` installer fetched
+  Camoufox **152.0.4 beta.30**. This browser binary version is separate from the
+  pinned REST service version. See [the validation report](PHASE_3B1_VALIDATION_REPORT.md)
+  for the bounded live results and remaining limitations.
 
 | Capability | Actual pinned REST contract |
 | --- | --- |
@@ -48,6 +51,24 @@ Set-Location camofox-browser
 git checkout --detach e5a36f5cd0332fde6597de474329a308a53a0716
 npm ci
 ```
+
+On the validated Windows machine, `npm ci` initially failed building
+`better-sqlite3@13.0.1`: Node 25.2.1/npm 11.6.2 used node-gyp 11.4.2, and portable
+Node 22.23.2/npm 10.9.8 used node-gyp 11.5.0. Both reported an unrecognized Visual
+Studio 18 installation. The installed C++ workload was present. The fix was
+**build tooling only**, using isolated npm 11.6.3 (node-gyp 12.1.0), which adds
+[official Visual Studio 2026 support](https://github.com/nodejs/node-gyp/releases/tag/v12.1.0).
+With Node 22.23.2 first on that terminal's PATH, install the tool outside LeadPro
+and invoke its CLI against the unmodified CamoFox lockfile:
+
+```powershell
+npm install --prefix C:\tmp\leadpro-camofox-build-tools --no-audit --no-fund npm@11.6.3
+node C:\tmp\leadpro-camofox-build-tools\node_modules\npm\bin\npm-cli.js ci --no-audit --no-fund
+```
+
+The portable Node ZIP was downloaded from the [official Node archive](https://nodejs.org/en/download/archive/v22.23.2)
+and checked against its published SHA-256. Do not disable certificate checks or
+change CamoFox's pinned dependencies to work around installation errors.
 
 Before the first launch, edit the service checkout's `camofox.config.json` to use:
 
@@ -128,6 +149,14 @@ worker passes retry after service health recovers. Stale runs retain their histo
 and their IDs for orphan cleanup. The service's two-minute idle expiry is a final
 fallback. Network failures cannot guarantee immediate remote destruction.
 
+Phase 3B.1 fixed a real shutdown race: cancellation now waits for the in-flight
+tab-creation POST to finish within its existing request timeout before deleting
+the context. It tolerates repeated cancellation and never replays the POST. An
+early DELETE previously triggered CamoFox's own context recreation, leaving a
+stale session and disrupting later page creation. Graceful shutdown can therefore
+wait for the remaining request timeout plus bounded session cleanup. Abrupt
+process termination still relies on persisted recovery/cleanup and service expiry.
+
 No cookies, localStorage or authenticated browser state are imported/reused across
 businesses. Tracing stays off. Crash reporting is explicitly disabled at service
 launch; the Python adapter cannot attest to a separately configured service's
@@ -162,5 +191,7 @@ python -m unittest tests.test_camofox_provider.LiveCamoFoxTests -v
 ```
 
 The opt-in test visits only `https://example.com/`, reads its title and closes the
-tab/session. It does not search Google, Yelp or LinkedIn. No live pilot is attempted
-when discovery credentials or the local browser service are unconfigured.
+tab/session. It does not search Google, Yelp or LinkedIn. Live discovery requires
+configured discovery credentials. Phase 3B.1 used the existing internal fixture
+source injection to supply five manually verified public websites; it did not add
+a product route that bypasses discovery or destination validation.
