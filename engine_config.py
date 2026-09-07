@@ -21,6 +21,7 @@ class EngineConfig:
     concurrency: int = field(default_factory=lambda: bounded("CAMOFOX_MAX_BROWSER_CONCURRENCY", 2, 1, 2))
     pages: int = field(default_factory=lambda: bounded("CAMOFOX_MAX_PAGES_PER_BUSINESS", 3, 1, 4))
     settle_ms: int = field(default_factory=lambda: bounded("CAMOFOX_PAGE_SETTLE_MS", 1200, 0, 3000))
+    readiness_ms: int = field(default_factory=lambda: bounded("CAMOFOX_READINESS_TIMEOUT_MS", 4000, 500, 5000))
     screenshots: bool = field(default_factory=lambda: os.getenv("AUDIT_SCREENSHOTS_ENABLED", "false").lower() == "true")
     discovery_pages: int = field(default_factory=lambda: bounded("DISCOVERY_MAX_PAGES_PER_PROVIDER", 3, 1, 5))
     artifacts: Path = field(default_factory=lambda: Path(__file__).resolve().parent / "audit_artifacts")

@@ -631,6 +631,12 @@ async def api_lg_stream(jid: str, user: str = Depends(get_current_user)):
     return StreamingResponse(updates(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
+@app.get("/api/discovery/readiness")
+async def api_discovery_readiness(user: str = Depends(get_current_user)):
+    from discovery import provider_readiness
+    return provider_readiness()
+
+
 @app.get("/api/browser/health")
 async def api_browser_health(user: str = Depends(get_current_user)):
     return asdict(await evidence_worker.browser.health())

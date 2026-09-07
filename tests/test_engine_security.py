@@ -58,6 +58,14 @@ class EngineRouteSecurityTests(unittest.TestCase):
             self.assertEqual(self.client.post('/api/leadgen/start', json={**REQUEST, key: 'secret'}, headers=self.alice).status_code, 422)
             self.assertEqual(self.client.put('/api/config', json={key: 'secret'}, headers=self.alice).status_code, 400)
 
+    def test_discovery_readiness_requires_auth_and_returns_only_safe_configuration(self):
+        self.assertEqual(self.client.get('/api/discovery/readiness').status_code, 401)
+        response = self.client.get('/api/discovery/readiness', headers=self.alice)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()), {'serper_maps', 'google_places', 'yelp'})
+        for row in response.json().values():
+            self.assertEqual(set(row), {'configured','adapter_enabled','pagination','hard_max_pages','config_status','quota_status'})
+
     def test_cancellation_survives_new_store_instance(self):
         response = self.client.post('/api/leadgen/start', json=REQUEST, headers=self.alice)
         jid = response.json()['job_id']

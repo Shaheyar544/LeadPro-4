@@ -61,7 +61,7 @@ not a multi-tenant SaaS security model.
 - Cancellation is persistent and checked between safe operations. Pending items
   are cancelled immediately; active browser work reaches a bounded safe boundary
   then tears down. SSE disconnects and refreshes never cancel work.
-- `qualified_count` means a business with a completed page and enough assessable
+- `qualified_count` means a business with a completed or usable partial page and enough assessable
   evidence to compute a gap; it is not a sales-qualified lead or predicted intent.
   Missing websites stay unverified. Failed/blocked audits produce partial jobs.
   Provider exhaustion/caps yield partial jobs even if every returned item finishes.
@@ -126,7 +126,7 @@ or failures remain unknown, and its raw response is discarded.
 Only known present evidence survives a partial audit as present. Absence needs
 completed coverage with no unknown/blocked/failed competing observation. Even
 then absence means “not observed on the bounded assessed pages,” not site-wide
-proof. Evidence has version `rendered_dom_v1` and stable stored IDs used in score
+proof. New evidence has version `rendered_dom_v1.2` and stable stored IDs used in score
 breakdowns. Blocks/challenges/login walls stop further work; no bypass is attempted.
 
 ## Deterministic score: website_conversion_v1
@@ -168,7 +168,7 @@ opportunity is null even when provider reputation is strong. Scores round to two
 decimals and never leave 0–100.
 
 `EvidenceConfidence = 100 × assessed/applicable weight × weighted detector
-confidence × completed/attempted page coverage`. Blocked/failed coverage lowers
+confidence × (completed + 0.5 × partial)/attempted page coverage`. Blocked/failed coverage lowers
 confidence; it does not generate missing-feature points. `ContactConfidence` is
 100 times the strongest public contact confidence: mailto/tel .98, visible text
 .80, provider-only phone .50, none 0. Contacts do not add Digital Gap points.
@@ -185,3 +185,53 @@ network/container isolation, optional Chromium checks, larger benchmarks, provid
 contract hardening, better entity resolution and score calibration. PostgreSQL/
 Redis should be considered only when measured scale requires them. Phase 3C is
 not started by this implementation.
+
+
+## Phase 3B.2 observation semantics
+
+`audit_engine/readiness.py` supplies a provider-independent bounded DOM readiness
+model, described in CAMOFOX_SETUP.md. The CamoFox adapter uses blank allocation
+then navigation so failures have explicit phases. The runner can retain valid
+positive evidence from a partial DOM, a failed later evaluation, or failed
+snapshot/viewport/screenshot operation. Unavailable detector inputs remain
+unknown. A complete audit requires every selected page to finish ready with its
+requested observation operations available. Some useful evidence plus any
+unavailable page/operation is partial. No meaningful page evidence is failed;
+explicit access restrictions are blocked. Parking/maintenance/JS requirements
+have separate normalized reasons under failed, rather than business success.
+
+Migration 51 adds `audit_navigation_attempts`, keyed by run/page/attempt. Writes
+before each request make interrupted attempt counts durable; final updates retain
+bounded readiness counts, error phases and observed destination endpoints. An
+interrupted row can remain `running` while its enclosing run becomes
+`worker_interrupted`; this records where execution stopped. GET business detail
+includes diagnostics only for the authorized user's selected run. Internal
+browser identifiers and service messages remain excluded. The existing job-item
+attempt counter measures whole-run recovery; this separate table measures the
+maximum two navigations per page. Cleanup must succeed before the worker replaces
+and persists a fresh session. The previous context cannot be forgotten while its
+cleanup is unresolved.
+
+Evidence confidence now has independent deterministic version
+`render_coverage_v2`: a completed page contributes 1, a partial page contributes
+0.5, and blocked/failed contributes 0, divided by attempted logical pages. This
+factor multiplies existing assessed-weight coverage and weighted detector
+confidence. It is not a reliability probability. Contact confidence and
+`website_conversion_v1` opportunity weights/formula are unchanged. Improved
+readiness can legitimately turn scoped unknowns into observed absence, changing
+an opportunity result without tuning its weights. Detector provenance is
+`rendered_dom_v1.2`; older immutable evidence retains its original version.
+
+The original six conservative unknowns were reviewed: five widget cases lack
+universal negative proof and remain unknown, while Arrington's quote-form absence
+can be assessed when all selected pages become ready. Vendor resources establish
+presence only. No iframe crawl, browser search, inferred website, guessed email,
+personal profile enrichment or widget interaction was added.
+
+Provider readiness is a local configuration diagnostic. Existing Google Legacy
+pagination follows [Google's token contract](https://developers.google.com/maps/documentation/places/web-service/legacy/search-text);
+Yelp follows its [search offset contract](https://docs.developer.yelp.com/reference/v3_business_search).
+Serper remains one page. Mocked provider responses exercise persistence dedupe,
+page limits and target stopping; opt-in credentialed tests perform only a tiny
+first-page smoke. Manually supplied validation records are explicitly tagged
+`manual_validation_fixture`, separate from production discovery provenance.

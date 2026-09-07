@@ -18,10 +18,10 @@ class AuditEngine:
         self.settings = settings
         self.validate = validate
 
-    async def run(self, business, session, *, cancelled=lambda: False):
+    async def run(self, business, session, *, cancelled=lambda: False, recover_session=None, record_attempt=None):
+        from .readiness import observe
         website = business.get("website_url") or ""
         result = dict(status="completed", final_url=None, error_code=None, pages=[], evidence=[], contacts=[])
-        # Explicit provider phone is public provenance, kept separate from rendered contacts.
         if business.get("provider_phone"):
             result["contacts"] += public_contacts({"contacts": [{"type": "phone", "kind": "provider_public", "value": business["provider_phone"]}]}, business.get("provider_source_url", ""))
         if not website:
@@ -30,75 +30,140 @@ class AuditEngine:
             return result
         pending = [(website, "homepage")]
         base = None
-        while pending and len(result["pages"]) < min(self.settings.pages, 4):
+        stop = False
+        while pending and len(result["pages"]) < min(self.settings.pages, 4) and not stop:
             if cancelled():
                 result.update(status="cancelled", error_code="cancelled")
                 break
             url, page_type = pending.pop(0)
-            page_record = dict(id=uid(), url=url, page_type=page_type, status="failed", observed_at=now())
-            result["pages"].append(page_record)
-            page = None
-            started = time.monotonic()
-            try:
-                # Same policy applies even to injected or future providers.
-                url = await self.validate(url)
-                if base and domain(url) != domain(base):
-                    raise BrowserError("unsafe_navigation")
-                page = await self.browser.open_page(session, url)
-                final_url = await self.validate(page.url)
-                if base and domain(final_url) != domain(base):
-                    raise BrowserError("unsafe_navigation")
-                facts = await self.browser.evaluate(page, EXTRACT)
-                if not isinstance(facts, dict) or not all(key in facts for key in ("url", "ready_state", "complete", "links", "contacts", "forms", "ctas", "resources")):
-                    raise BrowserError("browser_protocol_error")
-                if not all(isinstance(facts[k], list) for k in ("links", "contacts", "forms", "ctas", "resources")):
-                    raise BrowserError("browser_protocol_error")
-                if not all(isinstance(item, dict) for key in ("links", "contacts", "forms", "ctas") for item in facts[key]) or not all(isinstance(item, str) for item in facts["resources"]):
-                    raise BrowserError("browser_protocol_error")
-                final_url = await self.validate(facts["url"])
-                if domain(final_url) != domain(url):
-                    # Only www alias changes are accepted; cross-domain identity needs verification.
-                    raise BrowserError("unsafe_navigation")
-                page_record.update(final_url=final_url, title=str(facts.get("title", ""))[:240],
-                                   navigation_ms=round((time.monotonic() - started) * 1000))
-                result["final_url"] = result["final_url"] or final_url
-                if facts.get("blocked") or facts.get("login_wall"):
-                    raise BrowserError("browser_blocked")
-                if facts.get("http_status") and facts["http_status"] >= 400:
-                    raise BrowserError("browser_navigation_failed")
-                if facts.get("ready_state") not in {"complete", "interactive"}:
-                    raise BrowserError("browser_navigation_failed")
-                page_record["status"] = "completed"
-                findings, contacts = detect(facts, page_record)
-                result["evidence"] += findings
-                result["contacts"] += contacts
-                if not facts.get("complete"):
-                    result.update(status="partial", error_code="audit_incomplete")
-                if page_type == "homepage":
-                    base = final_url
-                    pending = selected_links(facts["links"], final_url, self.settings.pages)
-                    # Viewport control is supported in pinned CamoFox 1.14.0.
-                    await self._mobile(page, page_record, result)
-                if cancelled():
-                    result.update(status="cancelled", error_code="cancelled")
+            record = dict(id=uid(), url=url, page_type=page_type, status="failed", observed_at=now(), attempts=[])
+            result["pages"].append(record)
+            for attempt in range(1, 3):
+                page = None
+                started = time.monotonic()
+                diagnostic = dict(attempt=attempt, phase="redirect_validation", status="running", error_code=None,
+                                  dom=False, title=False, links=False, snapshot=False, evaluate=False,
+                                  redirects=[url], redirect_chain_complete=False)
+                record["attempts"].append(diagnostic)
+                def persist():
+                    if record_attempt:
+                        record_attempt(record["id"], attempt, diagnostic)
+                persist()  # Durable attempt count before a browser request, including interrupted runs.
+                try:
+                    url = await self.validate(url)
+                    if base and domain(url) != domain(base):
+                        raise BrowserError("external_redirect", phase="redirect_validation")
+                    diagnostic["phase"] = "tab_create"
+                    page = await self.browser.open_page(session, url)
+                    final_url = await self.validate(page.url)
+                    if domain(final_url) != domain(url):
+                        raise BrowserError("external_redirect", phase="redirect_validation")
+                    diagnostic["redirects"] = list(dict.fromkeys([url, final_url]))
+                    diagnostic["phase"] = "dom_ready"
+                    facts, readiness = await observe(self.browser, page, EXTRACT, self.settings.readiness_ms, self.validate, domain(url))
+                    record.update(final_url=facts["url"], title=str(facts.get("title", ""))[:240])
+                    diagnostic.update(readiness=readiness, dom=True, title=bool(facts.get("title")), evaluate=True,
+                                      links=bool(facts["links"]), phase="link_extract")
+                    diagnostic["redirects"] = list(dict.fromkeys([url, final_url, facts["url"]]))
+                    errors = []
+                    if page.navigation_error:
+                        errors.append(page.navigation_error.diagnostic())
+                    # REST diagnostics never replace the visibility-filtered DOM links.
+                    for phase, operation in (("link_extract", self.browser.get_links), ("snapshot", self.browser.get_snapshot)):
+                        diagnostic["phase"] = phase
+                        try:
+                            observed = await asyncio.wait_for(operation(page), timeout=3)
+                            if phase == "snapshot":
+                                if not isinstance(observed, dict) or not isinstance(observed.get("snapshot"), str):
+                                    raise BrowserError("browser_protocol_error", phase="snapshot")
+                                snapshot_url = await self.validate(observed.get("url", ""))
+                                if domain(snapshot_url) != domain(url):
+                                    raise BrowserError("external_redirect", phase="redirect_validation")
+                                diagnostic["snapshot"] = bool(observed.get("snapshot"))
+                        except (BrowserError, asyncio.TimeoutError) as exc:
+                            if isinstance(exc, BrowserError) and exc.code in {"unsafe_navigation", "external_redirect", "browser_blocked", "browser_tls_error"}:
+                                raise
+                            errors.append(exc.diagnostic() if isinstance(exc, BrowserError) else dict(code="browser_snapshot_timeout" if phase == "snapshot" else "browser_timeout", phase=phase))
+                    if errors or readiness["status"] != "ready":
+                        facts["complete"] = False
+                        record["status"] = "partial"
+                        diagnostic["error_code"] = errors[0]["code"] if errors else readiness["reason"]
+                        diagnostic["error_phase"] = errors[0].get("phase") if errors else "render_settle" if readiness["reason"] == "browser_render_timeout" else "evaluate"
+                    else:
+                        record["status"] = "completed"
+                    diagnostic["operations_failed"] = errors
+                    findings, contacts = detect(facts, record)
+                    result["evidence"] += findings
+                    result["contacts"] += contacts
+                    result["final_url"] = result["final_url"] or record["final_url"]
+                    if page_type == "homepage":
+                        base = record["final_url"]
+                        diagnostic["phase"] = "page_select"
+                        pending = selected_links(facts["links"], base, self.settings.pages)
+                        await self._mobile(page, record, result)
+                    if cancelled():
+                        result.update(status="cancelled", error_code="cancelled")
+                        stop = True
+                    elif self.settings.screenshots and page_type in {"homepage", "contact"}:
+                        diagnostic["phase"] = "snapshot"
+                        await self._screenshot(page, record)
+                    diagnostic["status"] = record["status"]
                     break
-                if self.settings.screenshots and page_type in {"homepage", "contact"}:
-                    await self._screenshot(page, page_record)
-            except BrowserError as exc:
-                status = "blocked" if exc.code == "browser_blocked" else "failed"
-                page_record["status"] = status
-                result.update(status="partial" if any(p["status"] == "completed" for p in result["pages"]) else status, error_code=exc.code)
-                result["evidence"] += [evidence(key, status, url=url, page_type=page_type, page_id=page_record["id"]) for key in KEYS]
-                # Never retry denial/challenges/unsafe redirects in another session.
-                if exc.code in {"browser_blocked", "unsafe_navigation", "browser_unavailable", "browser_session_lost"}:
+                except BrowserError as exc:
+                    diagnostic.update(getattr(exc, "observation", {}))
+                    diagnostic.update(error_code=exc.code, phase=exc.phase or diagnostic["phase"], http_status=exc.http_status,
+                                      status="blocked" if exc.code == "browser_blocked" else "failed")
+                    # Retry only known transient failures, only before useful DOM,
+                    # and only after confirmed cleanup of the previous context.
+                    can_retry = (attempt == 1 and recover_session is not None and not diagnostic["dom"] and not cancelled()
+                                 and exc.retryable and exc.code in {"browser_session_lost", "browser_connection_reset", "browser_navigation_timeout", "browser_protocol_error"})
+                    if can_retry:
+                        diagnostic["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+                        persist()
+                        await asyncio.sleep(.3)
+                        if cancelled():
+                            result.update(status="cancelled", error_code="cancelled"); stop = True; break
+                        try:
+                            replacement = await recover_session(session)
+                        except BrowserError as recovery_error:
+                            replacement = None
+                            diagnostic["recovery_error"] = recovery_error.diagnostic()
+                        if replacement is not None:
+                            session, page = replacement, None
+                            diagnostic["retry_scheduled"] = True
+                            continue
+                    useful = any(e["page_id"] == record["id"] and e["status"] == "present" for e in result["evidence"])
+                    record["status"] = "partial" if useful else diagnostic["status"]
+                    if not useful:
+                        result["evidence"] += [evidence(key, diagnostic["status"], url=url, page_type=page_type, page_id=record["id"]) for key in KEYS]
+                    stop = exc.code in {"browser_blocked", "unsafe_navigation", "external_redirect", "browser_tls_error", "browser_unavailable", "browser_session_lost", "browser_parking", "browser_maintenance", "browser_javascript_required"}
                     break
-            finally:
-                if page is not None:
-                    try:
-                        await self.browser.close_page(page)
-                    except BrowserError:
-                        pass  # Session cleanup remains mandatory in the worker's finally.
-        # Optional external measurement; never reinterpret navigation milliseconds.
+                finally:
+                    diagnostic["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+                    if page is not None:
+                        try:
+                            await asyncio.wait_for(self.browser.close_page(page), timeout=8)
+                        except (BrowserError, asyncio.TimeoutError) as cleanup_error:
+                            code = cleanup_error.code if isinstance(cleanup_error, BrowserError) else "browser_cleanup_timeout"
+                            diagnostic["cleanup_error"] = code
+                            if record["status"] == "completed":
+                                record["status"] = "partial"
+                                diagnostic.update(status="partial", error_code=code, error_phase="cleanup")
+                    persist()
+            record["navigation_ms"] = sum(d["elapsed_ms"] for d in record["attempts"])
+            record["error_code"] = record["attempts"][-1].get("error_code")
+            if record["status"] == "partial":
+                # Including a failed later screenshot/viewport operation: preserve
+                # positives while preventing absence from incomplete observations.
+                for row in result["evidence"]:
+                    if row["page_id"] == record["id"] and row["status"] == "absent":
+                        row.update(status="unknown", confidence=0)
+        if result["status"] != "cancelled":
+            statuses = [p["status"] for p in result["pages"]]
+            useful = any(s in {"completed", "partial"} for s in statuses)
+            result["status"] = "completed" if statuses and all(s == "completed" for s in statuses) else "partial" if useful else "blocked" if "blocked" in statuses else "failed"
+            result["error_code"] = next((p.get("error_code") for p in result["pages"] if p["status"] != "completed" and p.get("error_code")), None)
+            if result["status"] == "partial" and not result["error_code"]: result["error_code"] = "audit_incomplete"
         if result["status"] == "completed" and not cancelled():
             import config
             if config.PAGESPEED_API_KEY:
@@ -113,7 +178,9 @@ class AuditEngine:
     async def _mobile(self, page, record, result):
         finding = evidence("mobile_layout", "unknown", url=record["final_url"], page_id=record["id"])
         try:
-            if await self.browser.set_viewport(page, 390, 844):
+            if not await self.browser.set_viewport(page, 390, 844):
+                raise BrowserError("browser_protocol_error", phase="viewport")
+            else:
                 await asyncio.sleep(min(self.settings.settle_ms, 500) / 1000)
                 layout = await self.browser.evaluate(page, MOBILE)
                 if not isinstance(layout, dict):
@@ -128,8 +195,12 @@ class AuditEngine:
                                        url=record["final_url"], page_id=record["id"], locator="document.documentElement.scrollWidth",
                                        excerpt="Firefox layout overflow check at 390 CSS px; not a Chromium/device certification.", confidence=0.75)
         except BrowserError as exc:
-            if exc.code in {"unsafe_navigation", "browser_session_lost"}:
+            if exc.phase is None: exc.phase = "viewport"
+            if exc.code in {"unsafe_navigation", "external_redirect", "browser_session_lost"}:
                 raise
+            record["status"] = "partial"
+            record["attempts"][-1]["operations_failed"].append(exc.diagnostic())
+            record["attempts"][-1]["error_code"] = exc.code
         finally:
             result["evidence"].append(finding)
 

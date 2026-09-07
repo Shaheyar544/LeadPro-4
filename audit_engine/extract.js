@@ -17,6 +17,12 @@
   const blocked = [401, 403, 429].includes(httpStatus) || wall.test(document.title) ||
     wall.test(bodyText.slice(0, 3000)) || wall.test([...document.querySelectorAll('h1,h2')].map(el => el.innerText).join(' ')) ||
     (bodyText.length < 2000 && /sign in to continue|log in to continue/i.test(bodyText)) || /captcha/i.test(document.title);
+  const heading = clean([...document.querySelectorAll('h1,h2')].filter(visible).map(el => el.innerText).join(' '), 500);
+  const errorText = document.title + ' ' + heading + (bodyText.length < 2000 ? ' ' + bodyText : '');
+  const softError = blocked ? 'browser_blocked' :
+    /^(?:.*\s)?(?:this domain (?:is |may be )?for sale|buy this domain|domain (?:is )?parked|website coming soon)(?:[.!\s]|$)/i.test(errorText) ? 'browser_parking' :
+    /(?:site (?:is )?under maintenance|temporarily unavailable|service unavailable|bad gateway|error 50[0234]|web server is down|origin is unreachable)/i.test(errorText) ? 'browser_maintenance' :
+    /(?:please enable javascript to (?:continue|view)|javascript (?:is )?disabled|enable cookies to continue)/i.test(errorText) ? 'browser_javascript_required' : null;
   const anchors = [...document.querySelectorAll('a[href]')].filter(visible);
   const links = anchors.slice(0, 250).map(el => ({href: clean(el.href, 2048), text: clean(el.innerText), locator: locator(el)}));
   const contacts = [];
@@ -58,7 +64,10 @@
   return {
     url: location.href, title: clean(document.title), ready_state: document.readyState,
     viewport: clean(document.querySelector('meta[name="viewport"]')?.content), http_status: httpStatus,
-    blocked, links, contacts: contacts.slice(0, 150), forms, ctas, resources,
+    blocked, soft_error: softError, soft_error_excerpt: softError ? clean(errorText) : "",
+    body_available: !!document.body, text_length: bodyText.trim().length, link_count: anchors.length,
+    limits_reached: count >= 10000 || anchors.length > 250 || allForms.length > 30 || contacts.length >= 150 || bodyText.length >= 150000,
+    links, contacts: contacts.slice(0, 150), forms, ctas, resources,
     generator: clean(document.querySelector('meta[name="generator"]')?.content),
     tracking: {ga: /gtag\(\s*['"]config['"]\s*,\s*['"]G-|google-analytics\.com|analytics\.js/.test(inline),
       gtm: /GTM-[A-Z0-9]+/.test(inline), meta_pixel: /fbq\(\s*['"]init['"]/.test(inline)},

@@ -5,11 +5,13 @@ intercept Firefox subresources or intermediate redirects: service-side network
 egress isolation is required before deploying against untrusted sites at scale.
 """
 import asyncio
+import errno
 import ipaddress
 import json
 import re
 import uuid
 from urllib.parse import urlsplit, quote
+from engine_store import domain
 
 import aiohttp
 
@@ -23,7 +25,7 @@ async def validate_destination(url: str) -> str:
         await resolve_public(urlsplit(url).hostname, urlsplit(url).port or (443 if url.startswith("https:") else 80))
         return url
     except (UnsafeURL, ValueError, OSError, asyncio.TimeoutError):
-        raise BrowserError("unsafe_navigation") from None
+        raise BrowserError("unsafe_navigation", phase="redirect_validation") from None
 
 
 def service_url(value: str, access_key: str) -> str:
@@ -60,7 +62,38 @@ class CamoFoxProvider(BrowserProvider):
         self.settle_ms = max(0, min(int(settle_ms), 3000))
         self._http = None
 
+    @staticmethod
+    def _phase(method, path):
+        if method == "DELETE": return "cleanup"
+        if path == "/tabs": return "tab_create"
+        return {"navigate": "initial_navigation", "evaluate": "evaluate", "links": "link_extract",
+                "snapshot": "snapshot", "screenshot": "snapshot", "viewport": "viewport"}.get(path.rsplit("/", 1)[-1], "connect")
+
+    @staticmethod
+    def _timeout_code(phase):
+        return {"connect": "browser_connect_timeout", "tab_create": "browser_tab_timeout",
+                "initial_navigation": "browser_navigation_timeout", "evaluate": "browser_evaluate_timeout",
+                "snapshot": "browser_snapshot_timeout", "cleanup": "browser_cleanup_timeout"}.get(phase, "browser_timeout")
+
+    @classmethod
+    def response_error(cls, status, data, phase):
+        # Allowlisted classifications only; raw messages never leave this function.
+        code, retry = "browser_protocol_error", False
+        supplied = str(data.get("code", ""))
+        message = str(data.get("error", ""))[:4096]
+        if status in (401, 403): code = "browser_unavailable"
+        elif status == 429: code = "browser_blocked"
+        elif supplied == "ssl_error" or re.search(r"SEC_ERROR|SSL_ERROR|MOZILLA_PKIX_ERROR", message): code = "browser_tls_error"
+        elif re.search(r"access denied|captcha|too many requests|robots restriction", message, re.I): code = "browser_blocked"
+        elif status in (408, 504) or supplied == "tab_timeout" or re.search(r"timed out|timeout", message, re.I):
+            code, retry = cls._timeout_code(phase), True
+        elif status in (404, 410, 503): code, retry = ("browser_unavailable", False) if phase == "connect" else ("browser_session_lost", True)
+        elif "NS_ERROR_NET_RESET" in message: code, retry = "browser_connection_reset", True
+        elif status >= 500: code = "browser_navigation_failed"
+        return BrowserError(code, phase=phase, http_status=status, retryable=retry)
+
     async def _request(self, method, path, *, body=None, params=None, binary=False):
+        phase = self._phase(method, path)
         if self._http is None or self._http.closed:
             self._http = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self.timeout), trust_env=False,
@@ -72,28 +105,21 @@ class CamoFoxProvider(BrowserProvider):
         for attempt in range(attempts):
             try:
                 async with self._http.request(method, self.base_url + path, json=body,
-                                              params=params, allow_redirects=False) as response:
-                    if response.status in (401, 403):
-                        raise BrowserError("browser_unavailable")
-                    if response.status == 404:
-                        raise BrowserError("browser_session_lost")
-                    if response.status == 429:
-                        raise BrowserError("browser_blocked")
-                    if response.status == 503:
-                        raise BrowserError("browser_unavailable" if path == "/health" else "browser_session_lost")
-                    if response.status in (408, 504):
-                        raise BrowserError("browser_timeout")
-                    if response.status >= 500:
-                        raise BrowserError("browser_navigation_failed")
-                    if response.status != 200:
-                        raise BrowserError("browser_protocol_error")
+                                              params=params, allow_redirects=False,
+                                              timeout=aiohttp.ClientTimeout(total=max(35, self.timeout) if method == "POST" and path == "/tabs" else self.timeout)) as response:
                     chunks, size = [], 0
                     async for chunk in response.content.iter_chunked(65536):
                         size += len(chunk)
-                        if size > 8 * 1024 * 1024:
+                        if size > (8 * 1024 * 1024 if response.status == 200 else 8192):
                             raise BrowserError("browser_protocol_error")
                         chunks.append(chunk)
                     payload = b"".join(chunks)
+                    if response.status != 200:
+                        try:
+                            error_data = json.loads(payload)
+                        except (ValueError, UnicodeError):
+                            error_data = {}
+                        raise self.response_error(response.status, error_data if isinstance(error_data, dict) else {}, phase)
                     if binary:
                         if response.content_type != "image/png" or not payload.startswith(b"\x89PNG\r\n\x1a\n"):
                             raise BrowserError("browser_protocol_error")
@@ -106,10 +132,15 @@ class CamoFoxProvider(BrowserProvider):
                 if attempt + 1 < attempts:
                     await asyncio.sleep(0.15)
                     continue
-                raise BrowserError("browser_timeout" if isinstance(exc, asyncio.TimeoutError)
-                                   else "browser_unavailable") from None
+                code = "browser_connect_timeout" if isinstance(exc, getattr(aiohttp, "ConnectionTimeoutError", ())) else self._timeout_code(phase) if isinstance(exc, asyncio.TimeoutError) else "browser_unavailable"
+                reset = isinstance(exc, aiohttp.ServerDisconnectedError) or (isinstance(exc, aiohttp.ClientOSError) and exc.errno in {errno.ECONNRESET, 10054})
+                if reset: code = "browser_connection_reset"
+                raise BrowserError(code, phase=phase, retryable=reset or isinstance(exc, asyncio.TimeoutError)) from None
+            except BrowserError as exc:
+                if exc.phase is None: exc.phase = phase
+                raise
             except (ValueError, UnicodeError):
-                raise BrowserError("browser_protocol_error") from None
+                raise BrowserError("browser_protocol_error", phase=phase) from None
 
     async def health(self):
         try:
@@ -125,13 +156,12 @@ class CamoFoxProvider(BrowserProvider):
         # so teardown is possible even if that POST times out after allocation.
         return BrowserSession("lead-engine-" + uuid.uuid4().hex, uuid.uuid4().hex)
 
-    async def open_page(self, session, url):
-        url = await validate_destination(url)
+    async def _create_tab(self, session):
         # Let the bounded, non-replayed creation request settle before worker
         # teardown. Deleting its context mid-POST makes CamoFox's new-page
         # recovery recreate that context after DELETE has already succeeded.
         request = asyncio.create_task(self._request("POST", "/tabs", body={
-            "userId": session.user_id, "sessionKey": session.session_key, "url": url, "trace": False}))
+            "userId": session.user_id, "sessionKey": session.session_key, "trace": False}))
         cancelled = False
         while True:
             try:
@@ -151,17 +181,40 @@ class CamoFoxProvider(BrowserProvider):
         if not isinstance(tab_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", tab_id):
             raise BrowserError("browser_protocol_error")
         session.pages.add(tab_id)
-        page = BrowserPage(tab_id, session, url)
+        # Blank internal allocation gives us a cleanup ID before navigation.
+        # about:blank is accepted ONLY as this service-created empty tab result.
+        if data.get("url") != "about:blank":
+            raise BrowserError("browser_protocol_error", phase="tab_create")
+        return BrowserPage(tab_id, session, "about:blank")
+
+    async def open_page(self, session, url):
+        url = await validate_destination(url)  # Unsafe input never reaches even POST /tabs.
         try:
-            page.url = await validate_destination(data.get("url", ""))
-            if self.settle_ms:
-                await asyncio.sleep(self.settle_ms / 1000)
-            return page
+            page = await self._create_tab(session)
         except BaseException:
             try:
                 await self.close_session(session)
             except BrowserError:
                 pass
+            raise
+        try:
+            await self.navigate(page, url)
+            return page
+        except BrowserError as exc:
+            # A timed-out navigation can leave useful DOM. Observe it once on the
+            # known tab, without replaying POST or guessing another destination.
+            if exc.code not in {"browser_blocked", "browser_tls_error", "unsafe_navigation", "external_redirect", "browser_unavailable", "browser_session_lost"}:
+                try:
+                    actual = await self.evaluate(page, "location.href")
+                    if actual != "about:blank":
+                        page.url = await validate_destination(actual)
+                        if domain(page.url) != domain(url):
+                            raise BrowserError("external_redirect", phase="redirect_validation")
+                        page.navigation_error = exc
+                        return page
+                except BrowserError as probe:
+                    if probe.code in {"unsafe_navigation", "external_redirect"}:
+                        raise probe from None
             raise
 
     def _path(self, page, operation=""):
@@ -173,6 +226,8 @@ class CamoFoxProvider(BrowserProvider):
         result = await self.evaluate(page, "location.href")
         try:
             page.url = await validate_destination(result)
+            if domain(page.url) != domain(url):
+                raise BrowserError("external_redirect", phase="redirect_validation")
         except BrowserError:
             try:
                 await self.close_session(page.session)

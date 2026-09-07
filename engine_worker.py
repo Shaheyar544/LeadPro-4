@@ -158,7 +158,20 @@ class PersistentWorker:
             try:
                 session = await self.browser.open_session()
                 rid = self.store.start_run(item, self.id, self.browser, session)
-                result = await self.audit.run(business, session, cancelled=lambda: self.cancelled(jid))
+                async def recover(old):
+                    nonlocal session
+                    if not (await self.browser.health()).available or not await self._cleanup(rid, old):
+                        return None
+                    if self.cancelled(jid): return None
+                    fresh = await self.browser.open_session()
+                    self.store.replace_run_session(jid, self.id, rid, fresh)
+                    session = fresh
+                    return fresh
+                kwargs = dict(cancelled=lambda: self.cancelled(jid))
+                if isinstance(self.audit, AuditEngine):
+                    kwargs.update(recover_session=recover, record_attempt=lambda page, attempt, details:
+                                  self.store.record_navigation(jid, self.id, rid, page, attempt, details))
+                result = await self.audit.run(business, session, **kwargs)
                 score = score_audit(business, result)
                 self.store.finish_run(jid, item, self.id, rid, result, score)
                 event("audit_finished", jid=jid, item=item["id"], bid=business["id"], rid=rid, provider=self.browser.name, code=result.get("error_code"), elapsed=time.monotonic() - started)
@@ -182,8 +195,10 @@ class PersistentWorker:
             await asyncio.wait_for(self.browser.close_session(session), timeout=8)
             if rid is not None:
                 self.store.cleaned(rid)
-        except (BrowserError, asyncio.TimeoutError):
-            event("session_cleanup_pending", rid=rid, provider=self.browser.name, code="browser_unavailable")
+            return True
+        except (BrowserError, asyncio.TimeoutError) as exc:
+            event("session_cleanup_pending", rid=rid, provider=self.browser.name, code=exc.code if isinstance(exc, BrowserError) else "browser_cleanup_timeout")
+            return False
 
     async def cleanup_orphans(self):
         # A down service is not hammered once per orphan on every poll.

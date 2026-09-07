@@ -4,7 +4,7 @@ from urllib.parse import urlsplit, unquote, urljoin
 from engine_store import now, uid, domain
 from url_safety import normalize_url, UnsafeURL
 
-VERSION = "rendered_dom_v1.1"
+VERSION = "rendered_dom_v1.2"
 KEYS = (
     "reachable", "final_url", "https", "title", "viewport_meta", "rendered_page_status",
     "email", "phone", "mailto", "tel", "contact_page", "facebook", "instagram", "linkedin", "youtube",

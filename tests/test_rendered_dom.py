@@ -59,3 +59,17 @@ class DOMFixtureTests(unittest.TestCase):
             self.assertTrue(page.evaluate(EXTRACT)['blocked'])
         finally:
             page.close()
+
+
+    def test_soft_error_pages_and_business_negative_control(self):
+        cases = [("Access denied", "browser_blocked"), ("Site under maintenance", "browser_maintenance"),
+                 ("This domain is for sale", "browser_parking"), ("Please enable JavaScript to continue", "browser_javascript_required"),
+                 ("Enable cookies to continue", "browser_javascript_required"), ("Bad Gateway", "browser_maintenance"),
+                 ("Oak Plumbing repair and maintenance services", None)]
+        for title, expected in cases:
+            page = self.context.new_page()
+            try:
+                page.set_content(f"<title>{title}</title><h1>{title}</h1><p>Contact information is currently unavailable.</p>")
+                self.assertEqual(page.evaluate(EXTRACT)["soft_error"], expected)
+            finally:
+                page.close()

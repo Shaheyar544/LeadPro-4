@@ -76,3 +76,13 @@ CREATE INDEX IF NOT EXISTS idx_evidence_run ON audit_evidence(audit_run_id, dete
 CREATE INDEX IF NOT EXISTS idx_contacts_business ON business_contacts(business_id, contact_type);
 CREATE INDEX IF NOT EXISTS idx_scores_business ON lead_scores(business_id, created_at);
 """
+
+# Separate table preserves unfinished attempt counts without altering legacy rows.
+RELIABILITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS audit_navigation_attempts (
+ audit_run_id TEXT NOT NULL REFERENCES audit_runs(id), page_id TEXT NOT NULL,
+ attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 2), details_json TEXT NOT NULL,
+ PRIMARY KEY(audit_run_id, page_id, attempt)
+);
+"""
+SCHEMA += RELIABILITY_SCHEMA

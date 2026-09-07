@@ -34,11 +34,11 @@ class CamoFoxContractTests(unittest.IsolatedAsyncioTestCase):
             if request.path == "/health":
                 return web.json_response({"ok": True, "browserRunning": False})
             if request.path == "/tabs":
-                return web.json_response({"tabId": "fixture-tab", "url": self.redirect or body["url"]})
+                return web.json_response({"tabId": "fixture-tab", "url": "about:blank"})
             if request.path.endswith("/links"):
                 return web.json_response({"links": [{"url": "https://business.test/contact", "text": "Contact"}], "pagination": {"hasMore": False}})
             if request.path.endswith("/evaluate"):
-                return web.json_response({"ok": True, "result": "https://business.test/"})
+                return web.json_response({"ok": True, "result": self.redirect or "https://business.test/"})
             if request.path.endswith("/snapshot"):
                 return web.json_response({"url": "https://business.test/", "snapshot": "Public business"})
             if request.path.endswith("/screenshot"):
@@ -94,14 +94,14 @@ class CamoFoxContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_denial_restart_block_and_protocol_are_normalized(self):
         session = await self.provider.open_session()
-        for status, code in [(401, "browser_unavailable"), (403, "browser_unavailable"), (404, "browser_session_lost"), (429, "browser_blocked"), (503, "browser_session_lost"), (504, "browser_timeout")]:
+        for status, code in [(401, "browser_unavailable"), (403, "browser_unavailable"), (404, "browser_session_lost"), (429, "browser_blocked"), (503, "browser_session_lost"), (504, "browser_tab_timeout")]:
             self.failure = status
             before = len(self.calls)
             with self.assertRaises(BrowserError) as caught:
                 await self.provider.open_page(session, "https://business.test/")
             self.assertEqual(caught.exception.code, code)
             self.assertNotIn("SECRET", str(caught.exception))
-            self.assertEqual(len(self.calls) - before, 1)
+            self.assertEqual(sum(c[0] == "POST" for c in self.calls[before:]), 1)
         self.failure = None; self.malformed = True
         with self.assertRaises(BrowserError) as caught:
             await self.provider.open_page(session, "https://business.test/")
@@ -113,10 +113,56 @@ class CamoFoxContractTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.provider._http, "request", side_effect=asyncio.TimeoutError):
             with self.assertRaises(BrowserError) as caught:
                 await self.provider.open_page(session, "https://business.test/")
-            self.assertEqual(caught.exception.code, "browser_timeout")
+            self.assertEqual(caught.exception.code, "browser_tab_timeout")
             health = await self.provider.health()
             self.assertFalse(health.available)
-            self.assertEqual(health.status, "browser_timeout")
+            self.assertEqual(health.status, "browser_connect_timeout")
+
+    async def test_navigation_timeout_can_preserve_known_public_page_without_replay(self):
+        session = await self.provider.open_session()
+        original = self.provider._request
+        async def request(method, path, **kwargs):
+            if path.endswith('/navigate'):
+                raise BrowserError('browser_navigation_timeout', phase='initial_navigation', retryable=True)
+            return await original(method, path, **kwargs)
+        with patch.object(self.provider, '_request', side_effect=request):
+            page = await self.provider.open_page(session, 'https://business.test/')
+        self.assertEqual(page.navigation_error.code, 'browser_navigation_timeout')
+        self.assertEqual(page.url, 'https://business.test/')
+        self.assertEqual(sum(c[1] == '/tabs' and c[0] == 'POST' for c in self.calls), 1)
+        await self.provider.close_session(session)
+
+    async def test_www_alias_allowed_but_external_domain_stops(self):
+        session = await self.provider.open_session()
+        self.redirect = 'https://www.business.test/'
+        page = await self.provider.open_page(session, 'http://business.test/')
+        self.assertEqual(page.url, self.redirect)
+        await self.provider.close_session(session)
+        self.redirect = 'https://different-business.test/'
+        with self.assertRaises(BrowserError) as caught:
+            await self.provider.open_page(session, 'https://business.test/')
+        self.assertEqual(caught.exception.code, 'external_redirect')
+        self.assertEqual(self.calls[-1][0], 'DELETE')
+
+    async def test_older_supported_aiohttp_timeout_class_is_optional(self):
+        import aiohttp
+        await self.provider.health()
+        with patch.object(aiohttp, 'ConnectionTimeoutError', ()), patch.object(self.provider._http, 'request', side_effect=asyncio.TimeoutError):
+            result = await self.provider.health()
+        self.assertEqual(result.status, 'browser_connect_timeout')
+
+    async def test_transport_reset_has_normalized_navigation_phase(self):
+        import aiohttp
+        session = await self.provider.open_session()
+        page = await self.provider.open_page(session, 'https://business.test/')
+        with patch.object(self.provider._http, 'request', side_effect=aiohttp.ServerDisconnectedError('SECRET')):
+            with self.assertRaises(BrowserError) as caught:
+                await self.provider.navigate(page, 'https://business.test/contact')
+        self.assertEqual(caught.exception.code, 'browser_connection_reset')
+        self.assertEqual(caught.exception.phase, 'initial_navigation')
+        self.assertTrue(caught.exception.retryable)
+        self.assertNotIn('SECRET', str(caught.exception))
+        await self.provider.close_session(session)
 
     async def test_cancel_during_tab_creation_finishes_request_before_cleanup(self):
         # Real CamoFox can recreate a context if DELETE races its in-flight POST.

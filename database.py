@@ -418,6 +418,8 @@ SCHEMA_MIGRATIONS = [
 
 from engine_schema import SCHEMA as ENGINE_SCHEMA
 SCHEMA_MIGRATIONS.append((50, ENGINE_SCHEMA))
+from engine_schema import RELIABILITY_SCHEMA
+SCHEMA_MIGRATIONS.append((51, RELIABILITY_SCHEMA))
 
 
 def run_migrations():

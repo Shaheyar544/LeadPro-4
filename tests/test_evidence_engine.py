@@ -42,7 +42,7 @@ class DetectorTests(unittest.TestCase):
         for row in rows:
             if row['status']=='present':
                 self.assertTrue(row['locator'] or row['excerpt'], row['detector_key'])
-                self.assertEqual(row['detector_version'], 'rendered_dom_v1.1')
+                self.assertEqual(row['detector_version'], 'rendered_dom_v1.2')
         for href in ['https://youtu.be/video', 'https://youtu.be/@business', 'https://youtube.com/watch?v=123', 'https://youtube.com/shorts/123']:
             self.assertIsNone(social_url(href, 'youtube'))
         self.assertEqual(social_url('https://youtube.com/channel/UCbusiness', 'youtube'), 'https://youtube.com/channel/UCbusiness')

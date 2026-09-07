@@ -150,7 +150,7 @@ and their IDs for orphan cleanup. The service's two-minute idle expiry is a fina
 fallback. Network failures cannot guarantee immediate remote destruction.
 
 Phase 3B.1 fixed a real shutdown race: cancellation now waits for the in-flight
-tab-creation POST to finish within its existing request timeout before deleting
+tab-creation POST to finish within its bounded request timeout before deleting
 the context. It tolerates repeated cancellation and never replays the POST. An
 early DELETE previously triggered CamoFox's own context recreation, leaving a
 stale session and disrupting later page creation. Graceful shutdown can therefore
@@ -195,3 +195,81 @@ tab/session. It does not search Google, Yelp or LinkedIn. Live discovery require
 configured discovery credentials. Phase 3B.1 used the existing internal fixture
 source injection to supply five manually verified public websites; it did not add
 a product route that bypasses discovery or destination validation.
+
+
+## Phase 3B.2 navigation and readiness
+
+The adapter allocates a blank tab (`POST /tabs`, without a destination), then uses
+`POST /tabs/{id}/navigate` for the validated public URL. Only the internal blank
+allocation response may contain `about:blank`; it is never an auditable website.
+This separates tab creation from navigation and retains a cleanup ID when the
+website times out. A failed navigation may be inspected once on that known tab;
+usable DOM is partial evidence, never proof of absence. No POST is automatically
+replayed by the HTTP adapter. Blank creation waits at least 35 seconds (at most
+60) before timeout so cancellation does not race the pinned service's 30-second
+creation deadline. The existing cancellation shielding remains in place.
+
+`CAMOFOX_READINESS_TIMEOUT_MS` defaults to 4000, clamped to 500–5000 ms. Within
+that observation budget, at most eight read-only DOM samples are taken, separated
+by up to 400 ms. Ready requires usable body text (at least 40 characters), complete
+readyState, valid bounded detector inputs, and two samples with unchanged link
+count and text length changing by at most max(20 characters, 2%). Interactive DOM,
+changing DOM, extraction limits, or a later failed observation produces partial
+when usable facts exist. No usable facts produces failed. This is a heuristic for
+the observed DOM, not proof every lazy/conditional component has loaded.
+
+The old settle setting is retained for compatibility and the bounded mobile
+viewport check; it no longer establishes desktop readiness. Links and transient
+snapshot diagnostics have three-second deadlines. Snapshot/viewport/screenshot
+failures preserve prior positive evidence and make the page partial. Snapshots
+are never persisted. Each page's bounded attempts, phases, elapsed times,
+readiness samples and normalized errors are retained in SQLite and owner-scoped
+business detail. Start and observed final URLs are recorded; intermediate HTTP
+redirects are not available from this REST contract and the chain is explicitly
+marked incomplete. Only www aliases and scheme upgrades preserve domain scope;
+unverified cross-domain aliases stop as `external_redirect`.
+
+The worker permits at most two navigation attempts per logical page, with a
+300 ms backoff, only for explicitly classified transient navigation timeout,
+connection reset, session loss, or retryable protocol error before usable DOM.
+Retry requires service health and successful cleanup of the old context, then
+persists fresh ephemeral identifiers before allocation. Cancellation suppresses
+retry. Denial/challenge/403/429, unsafe destinations, TLS trust errors, generic
+500s, ambiguous tab-creation timeouts and repeated failures do not trigger a new
+attempt. A production service may redact NS_ERROR details to a generic 500;
+classification retains the phase and status, without guessing its cause.
+
+Timeout codes distinguish connect, tab creation, navigation, DOM readiness,
+render settle, evaluate, snapshot and cleanup. Soft challenge/access restrictions
+are blocked. Conservative maintenance/hosting, domain parking, and JavaScript or
+cookie requirement signatures are explicit non-success reasons. These checks do
+not submit forms or solve challenges. See the Phase 3B.2 report for measured limits.
+
+## Discovery configuration and opt-in smoke tests
+
+Authenticated `GET /api/discovery/readiness` performs no network request. It
+returns only configured/enabled flags, pagination and page bounds, configuration
+status and unknown quota status. Configured does not imply valid credentials or
+available quota. Configure keys privately in the existing operator environment
+and restart; never paste them into chat or source files.
+
+The following flags intentionally enable tiny live smoke requests. Each uses an
+ordinary Roofing/Dallas query and parses at most one record: Serper and Yelp one
+search request, Google Legacy Text Search one search plus at most one Details
+request. Cursor types are checked without requesting another page. Missing keys
+skip cleanly. No raw response or contact list is persisted by these tests.
+
+```powershell
+$env:RUN_SERPER_INTEGRATION_TESTS = '1'
+$env:RUN_GOOGLE_PLACES_INTEGRATION_TESTS = '1'
+$env:RUN_YELP_INTEGRATION_TESTS = '1'
+python -m unittest tests.test_provider_readiness.ProviderIntegrationTests -v
+```
+
+Serper stays one-page: no verified pagination contract has been added. Google
+uses its existing Legacy API and needs credentials eligible for that API; new
+account/API enablement must be verified during the opt-in smoke. Yelp exposes
+listing provenance and public phone, not an authoritative business website; no
+website is guessed. Worker tests cover page bounds, deduplication, target stopping,
+Google token activation and Yelp offsets. Live availability is not established
+without successful credentialed tests.

@@ -187,3 +187,32 @@ mailboxes, discovery or scraping. A separate local UI smoke check may use an
 installed Edge browser with external requests blocked; the active business
 provider remains CamoFox. Live CamoFox integration is explicitly opt-in and visits
 only example.com. Live discovery/pilots require intentionally configured keys.
+
+
+## Phase 3B.2 reliability boundary
+
+Additive SQLite migration 51 stores bounded navigation diagnostics and durable
+attempt counts. Each attempt is recorded before a browser request. Existing
+history is retained; retries do not create duplicate scores or replay completed
+job items. A replacement context is allowed only after confirmed old-context
+cleanup, with new identifiers persisted before allocation. Failed teardown keeps
+the existing durable orphan marker. No context identity is rotated to bypass an
+access restriction. The maximum remains two concurrent businesses, three pages
+by default (hard maximum four), and two navigation attempts per page.
+
+Public URL and DNS validation remains before candidate navigation and after
+observed destinations, including extraction, snapshot and screenshot checks.
+Only www/scheme canonicalization is automatically trusted. Cross-domain redirects
+stop unverified. This cannot intercept every subresource or intermediate browser
+redirect: the existing local-only egress-isolation limitation still applies.
+
+Only valid visible inputs contribute contacts and positive findings. Missing
+inputs, partial pages, blocked pages and failed operations never become negative
+feature evidence. Soft-error pages are not ordinary business pages. Credentials,
+raw service errors, full DOM, snapshots, cookies and profiles are excluded from
+application diagnostics. Local validation screenshots and databases remain outside
+Git. Readiness requires authentication but makes no provider API request and
+returns no keys or inferred quotas. API smoke tests are opt-in and skipped without
+keys. Owner scoping, CSP/XSS handling, safe CSV, public-contact rules and retired
+outreach 404 routes remain covered by regressions. No authenticated browsing,
+form submission, CAPTCHA solving, proxies, enrichment or outreach was introduced.

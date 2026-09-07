@@ -154,3 +154,16 @@ def configured_sources():
     return [ProviderDiscovery(name, key) for name, key in (
         ("serper_maps", config.SERPER_API_KEY), ("google_places", config.GOOGLE_PLACES_API_KEY),
         ("yelp", config.YELP_API_KEY)) if key]
+
+
+def provider_readiness():
+    """Local configuration only. This diagnostic never contacts providers."""
+    import config
+    providers = (("serper_maps", "SERPER_API_KEY", "one_page", 1),
+                 ("google_places", "GOOGLE_PLACES_API_KEY", "next_page_token", 3),
+                 ("yelp", "YELP_API_KEY", "offset", 5))
+    return {name: dict(configured=bool(getattr(config, env, "")),
+                       adapter_enabled=bool(getattr(config, env, "")),
+                       pagination=pagination, hard_max_pages=pages,
+                       config_status="configured_unverified" if getattr(config, env, "") else "not_configured",
+                       quota_status="unknown") for name, env, pagination, pages in providers}

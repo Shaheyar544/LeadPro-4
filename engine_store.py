@@ -210,6 +210,18 @@ class EngineStore:
             conn.execute("INSERT INTO audit_runs(id,business_id,job_item_id,provider,provider_version,status,start_url,browser_user_id,browser_session_key,cleanup_pending,started_at) VALUES(?,?,?,?,?,'running',?,?,?,?,?)", (rid, item["business_id"], item["id"], provider.name, provider.version, business[0], session.user_id, session.session_key, 1, now()))
         return rid
 
+    def replace_run_session(self, jid, worker, rid, session):
+        # Called only after confirmed old-context cleanup; persist the new IDs
+        # before the lazy provider allocates any browser state.
+        with self.transaction(True) as conn:
+            self._lease(conn, jid, worker)
+            conn.execute("UPDATE audit_runs SET browser_user_id=?,browser_session_key=?,cleanup_pending=1 WHERE id=? AND status='running'", (session.user_id, session.session_key, rid))
+
+    def record_navigation(self, jid, worker, rid, page_id, attempt, details):
+        with self.transaction(True) as conn:
+            self._lease(conn, jid, worker)
+            conn.execute("INSERT INTO audit_navigation_attempts VALUES(?,?,?,?) ON CONFLICT(audit_run_id,page_id,attempt) DO UPDATE SET details_json=excluded.details_json", (rid, page_id, attempt, json.dumps(details)))
+
     def pending_cleanup(self):
         with self.transaction() as conn:
             return [dict(r) for r in conn.execute("SELECT id,browser_user_id,browser_session_key FROM audit_runs WHERE cleanup_pending=1 AND status!='running' LIMIT 100")]
@@ -236,7 +248,7 @@ class EngineStore:
 
     def _progress(self, conn, jid):
         processed = conn.execute("SELECT count(*) FROM search_job_items WHERE job_id=? AND status IN ('completed','failed','skipped','cancelled')", (jid,)).fetchone()[0]
-        qualified = conn.execute("SELECT count(DISTINCT i.id) FROM search_job_items i JOIN audit_runs r ON r.job_item_id=i.id JOIN lead_scores s ON s.audit_run_id=r.id WHERE i.job_id=? AND i.status='completed' AND r.pages_completed>0 AND s.digital_gap IS NOT NULL", (jid,)).fetchone()[0]
+        qualified = conn.execute("SELECT count(DISTINCT i.id) FROM search_job_items i JOIN audit_runs r ON r.job_item_id=i.id JOIN lead_scores s ON s.audit_run_id=r.id WHERE i.job_id=? AND i.status='completed' AND EXISTS (SELECT 1 FROM audit_pages p WHERE p.audit_run_id=r.id AND p.status IN ('completed','partial')) AND s.digital_gap IS NOT NULL", (jid,)).fetchone()[0]
         conn.execute("UPDATE search_jobs SET processed_count=?,qualified_count=? WHERE id=?", (processed, qualified, jid))
 
     def finish_job(self, jid, worker, error=None):
@@ -284,6 +296,10 @@ class EngineStore:
                 rid = run["id"]
                 for key, table in (("pages", "audit_pages"), ("evidence", "audit_evidence"), ("contacts", "business_contacts")):
                     result[key] = [dict(r) for r in conn.execute(f"SELECT * FROM {table} WHERE audit_run_id=?", (rid,))]
+                navigation = [dict(page_id=r[0], **json.loads(r[1])) for r in conn.execute("SELECT page_id,details_json FROM audit_navigation_attempts WHERE audit_run_id=? ORDER BY page_id,attempt", (rid,))]
+                result["navigation"] = navigation
+                for page in result["pages"]:
+                    page["attempts"] = [d for d in navigation if d["page_id"] == page["id"]]
                 for evidence in result["evidence"]:
                     evidence["value"] = json.loads(evidence.pop("normalized_value"))
                 row = conn.execute("SELECT * FROM lead_scores WHERE audit_run_id=? ORDER BY created_at DESC LIMIT 1", (rid,)).fetchone()

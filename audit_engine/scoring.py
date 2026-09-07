@@ -56,7 +56,7 @@ def score_audit(business, audit):
     strength = bounded(sum(p["score"] * p["weight"] for p in strength_parts) / sum(p["weight"] for p in strength_parts)) if strength_parts else None
     opportunity = bounded(0.7 * gap + 0.3 * strength) if gap is not None and strength is not None else gap
     confidence_mean = sum(findings[c["detector_key"]]["confidence"] * c["weight"] for c in components if c["status"] in {"present", "absent"}) / assessed_weight if assessed_weight else 0
-    page_coverage = sum(p["status"] == "completed" for p in audit["pages"]) / max(1, len(audit["pages"]))
+    page_coverage = sum(1 if p["status"] == "completed" else .5 if p["status"] == "partial" else 0 for p in audit["pages"]) / max(1, len(audit["pages"]))
     evidence_confidence = bounded(100 * coverage * confidence_mean * page_coverage)
     contact_confidence = bounded(100 * max((c["confidence"] for c in audit["contacts"]), default=0))
     primary = next((c["detector_key"] for c in sorted(components, key=lambda c: -c["weight"]) if c["status"] == "absent"), None)
@@ -66,6 +66,7 @@ def score_audit(business, audit):
                            "fallback": "gap_only" if strength is None and gap is not None else "insufficient_assessable_evidence" if gap is None else None,
                            "components": components, "strength_components": strength_parts,
                            "assessed_weight": assessed_weight, "applicable_weight": applicable_weight,
+                           "evidence_confidence_version": "render_coverage_v2",
                            "coverage": round(coverage, 4), "page_coverage": round(page_coverage, 4),
                            "minimum_assessment": "3 components and 35% applicable weight",
                            "primary_opportunity": primary, "findings": findings})
