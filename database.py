@@ -416,6 +416,10 @@ SCHEMA_MIGRATIONS = [
     (47, "ALTER TABLE outreach_accounts ADD COLUMN signature TEXT"),
 ]
 
+from engine_schema import SCHEMA as ENGINE_SCHEMA
+SCHEMA_MIGRATIONS.append((50, ENGINE_SCHEMA))
+
+
 def run_migrations():
     """Track and apply migrations idempotently using a versions table.
 
@@ -432,11 +436,16 @@ def run_migrations():
             continue
         try:
             with get_conn() as conn:
-                # executescript supports multi-statement / trigger bodies
-                conn.executescript(sql)
+                # New normalized schema is atomic and fails startup on migration errors.
+                if version >= 50:
+                    conn.executescript("BEGIN IMMEDIATE;\n" + sql)
+                else:
+                    conn.executescript(sql)
                 conn.execute("INSERT INTO schema_versions VALUES (?,datetime('now'))", (version,))
             print(f"[OK] Migration {version} applied")
         except Exception as e:
+            if version >= 50:
+                raise RuntimeError("Phase 3B database migration failed") from None
             msg = str(e).lower()
             # Idempotent failures: column/table/index/trigger already exists
             benign = (

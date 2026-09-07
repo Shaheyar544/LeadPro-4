@@ -7,6 +7,7 @@ let token = localStorage.getItem('lead_engine_token') || '';
 let offset = 0;
 let pollGeneration = 0;
 let currentUser = '';
+let activeJob = '';
 
 function textElement(tag, text) {
   const element = document.createElement(tag);
@@ -41,6 +42,10 @@ function logout() {
   $('login-panel').hidden = false;
   $('lead-rows').replaceChildren();
   $('job-log').replaceChildren();
+  $('recent-jobs').replaceChildren();
+  $('detail-content').replaceChildren();
+  $('business-detail').close();
+  activeJob = '';
 }
 
 async function showPage(page) {
@@ -58,6 +63,7 @@ async function showPage(page) {
     if (page === 'dashboard') await loadStats();
     if (page === 'leads') await loadLeads();
     if (page === 'settings') await loadSettings();
+    if (page === 'leadgen') await loadJobs();
   } catch (error) { showError(error); }
 }
 
@@ -87,11 +93,14 @@ function renderLeads(data) {
   const rows = [];
   for (const lead of data.leads) {
     const row = document.createElement('tr');
-    let findings = lead.pain_points || '';
-    try { const parsed = JSON.parse(findings); if (Array.isArray(parsed)) findings = parsed.join('; '); } catch { /* Render text. */ }
-    row.append(textElement('td', lead.business_name), textElement('td', [lead.city, lead.country].filter(Boolean).join(', ')),
-      websiteCell(lead.website), textElement('td', lead.email), textElement('td', lead.phone),
-      textElement('td', lead.lead_score), textElement('td', findings));
+    const detailButton = textElement('button', 'View evidence');
+    detailButton.type = 'button'; detailButton.className = 'btn btn-outline';
+    detailButton.addEventListener('click', () => showDetail(lead.id).catch(showError));
+    const detailCell = document.createElement('td'); detailCell.append(detailButton);
+    row.append(textElement('td', lead.business_name), textElement('td', [lead.city, lead.state].filter(Boolean).join(', ')),
+      websiteCell(lead.website), textElement('td', lead.opportunity_score), textElement('td', lead.digital_gap),
+      textElement('td', lead.evidence_confidence), textElement('td', lead.contact_confidence),
+      textElement('td', friendly(lead.primary_opportunity)), textElement('td', lead.audit_status), detailCell);
     rows.push(row);
   }
   $('lead-rows').replaceChildren(...rows);
@@ -135,30 +144,45 @@ function validationErrors(errors) {
   summary.focus();
 }
 
+async function loadJobs() {
+  const jobs = await (await api('/api/leadgen/jobs')).json();
+  $('recent-jobs').replaceChildren(...jobs.map(job => {
+    const item = document.createElement('li');
+    const button = textElement('button', `${job.category} · ${job.city}, ${job.state} · ${job.status}`);
+    button.type = 'button'; button.className = 'btn btn-outline';
+    button.addEventListener('click', () => { void pollJob(job.id); }); item.append(button); return item;
+  }));
+  return jobs;
+}
+
 async function pollJob(jid) {
   const generation = ++pollGeneration;
-  let sequence = 0;
+  activeJob = jid;
+  localStorage.setItem('lead_engine_job_' + currentUser, jid);
   $('lg-btn').disabled = true;
-  $('job-log').replaceChildren();
   while (generation === pollGeneration && token) {
     try {
-      const data = await (await api(`/api/leadgen/status/${encodeURIComponent(jid)}?after=${sequence}`)).json();
+      const data = await (await api(`/api/leadgen/jobs/${encodeURIComponent(jid)}`)).json();
       if (generation !== pollGeneration) return;
-      $('job-state').textContent = `Job ${data.job_id}: ${data.status}`;
-      for (const event of data.events) $('job-log').append(textElement('li', event.message));
-      while ($('job-log').children.length > 200) $('job-log').firstElementChild.remove();
-      sequence = data.sequence;
-      if (data.status !== 'running') {
+      const active = ['queued', 'running'].includes(data.status);
+      $('job-state').textContent = `${data.category} in ${data.city}, ${data.state}: ${data.status}${data.cancel_requested && active ? ' · cancellation requested' : ''}`;
+      $('job-log').replaceChildren(
+        textElement('li', `Discovered ${data.discovered_count} / ${data.target_count} target`),
+        textElement('li', `Processed ${data.processed_count} · Assessable businesses ${data.qualified_count}`),
+        textElement('li', data.error_message || 'Progress is saved to the database.'));
+      $('cancel-job').disabled = !active || Boolean(data.cancel_requested);
+      if (!active) {
         localStorage.removeItem('lead_engine_job_' + currentUser);
         $('lg-btn').disabled = false;
+        await loadJobs();
         return;
       }
     } catch (error) {
-      $('job-state').textContent = 'Progress unavailable. Work may still be running. Reload to reconnect.';
+      $('job-state').textContent = 'Progress unavailable. Reload to reconnect to the saved job.';
       if (error.status === 404) {
         localStorage.removeItem('lead_engine_job_' + currentUser);
-        $('job-state').textContent = 'Job no longer available. Jobs are lost after a server restart.';
         $('lg-btn').disabled = false;
+        $('cancel-job').disabled = true;
         return;
       }
       showError(error);
@@ -166,6 +190,80 @@ async function pollJob(jid) {
     await new Promise(resolve => setTimeout(resolve, 1500));
   }
 }
+
+function friendly(value) { return value ? String(value).replaceAll('_', ' ') : 'Not assessed'; }
+
+function statusBadge(value) {
+  const allowed = ['present', 'absent', 'unknown', 'blocked', 'failed', 'not_applicable'];
+  const status = allowed.includes(value) ? value : 'unknown';
+  const span = textElement('span', friendly(status)); span.className = 'evidence-status status-' + status; return span;
+}
+
+async function showDetail(bid) {
+  const sessionToken = token;
+  const detail = await (await api(`/api/businesses/${encodeURIComponent(bid)}`)).json();
+  if (!token || token !== sessionToken) return;
+  const business = detail.business, score = detail.score;
+  $('detail-title').textContent = business.canonical_name;
+  const nodes = [textElement('p', [business.category, business.city, business.state, business.address].filter(Boolean).join(' · ')),
+    textElement('p', `Audit: ${detail.audit?.status || 'pending'} · Observed: ${detail.audit?.finished_at || 'not yet'} · ${detail.audit?.error_message || ''}`)];
+  nodes.push(textElement('h3', 'Sources and website'));
+  const sources = document.createElement('ul');
+  for (const source of detail.sources) {
+    const item = textElement('li', `${source.provider} · ${source.provider_record_id} · ${source.source_url || 'No source URL'} · ${source.observed_at}`); sources.append(item);
+  }
+  nodes.push(sources, textElement('p', business.website_url || 'No authoritative website supplied.'));
+  nodes.push(textElement('h3', 'Scores and confidence'));
+  if (score) {
+    const scores = document.createElement('dl'); scores.className = 'score-grid';
+    for (const key of ['opportunity_score', 'digital_gap', 'business_strength', 'evidence_confidence', 'contact_confidence']) {
+      scores.append(textElement('dt', friendly(key)), textElement('dd', score[key] == null ? 'Unknown' : `${score[key]} / 100`));
+    }
+    nodes.push(scores, textElement('p', `${score.profile_version}: ${score.breakdown.formula}. ${score.breakdown.fallback ? 'Fallback: ' + friendly(score.breakdown.fallback) + '.' : ''}`));
+    nodes.push(textElement('p', 'Unknown, blocked and failed checks do not count as missing features. Absence refers only to the pages assessed. Mobile layout is a Firefox overflow check.'));
+  } else nodes.push(textElement('p', 'Scoring has not finished.'));
+  nodes.push(textElement('h3', 'Public business contacts'));
+  const contacts = document.createElement('ul');
+  for (const c of detail.contacts) contacts.append(textElement('li', `${c.normalized_value} · ${friendly(c.evidence_type)} · ${Math.round(c.confidence * 100)}% confidence · ${c.source_url || 'Provider source unavailable'} · ${c.excerpt || ''}`));
+  if (!detail.contacts.length) contacts.append(textElement('li', 'No public contacts observed. No contacts were guessed.'));
+  nodes.push(contacts, textElement('h3', 'Pages inspected'));
+  const pageList = document.createElement('ul');
+  for (const page of detail.pages) pageList.append(textElement('li', `${page.page_type}: ${page.status} · ${page.final_url || page.url} · ${page.title || ''} · ${page.navigation_ms ?? 'unknown'} ms navigation (diagnostic only)`));
+  nodes.push(pageList, textElement('h3', 'Evidence and score explanation'));
+  const evidenceList = document.createElement('div'); evidenceList.className = 'evidence-list';
+  const findingMap = score?.breakdown?.findings || {};
+  for (const [key, finding] of Object.entries(findingMap)) {
+    const section = document.createElement('section'); section.className = 'evidence-card';
+    const heading = textElement('h4', friendly(key)); heading.append(' ', statusBadge(finding.status)); section.append(heading);
+    const component = score.breakdown.components.find(c => c.detector_key === key);
+    if (component) section.append(textElement('p', `Scoring status: ${friendly(component.status)} · Weight ${component.weight} · Gap points: ${component.gap_points ?? 'excluded'}`));
+    for (const e of detail.evidence.filter(e => e.detector_key === key)) {
+      section.append(textElement('p', `${friendly(e.status)} · ${e.value == null ? 'No measured value' : typeof e.value === 'object' ? JSON.stringify(e.value) : e.value}`),
+        textElement('p', `${e.source_url || 'No page loaded'} · ${e.page_type || 'audit'} · ${e.observed_at}`),
+        textElement('p', `${Math.round(e.confidence * 100)}% confidence · ${e.detector_version} · ${e.locator || 'No locator'}`));
+      if (e.excerpt) section.append(textElement('blockquote', e.excerpt));
+    }
+    evidenceList.append(section);
+  }
+  nodes.push(evidenceList, textElement('p', `${detail.history.length} audit run(s) retained for this business.`));
+  $('detail-content').replaceChildren(...nodes);
+  $('business-detail').showModal(); $('close-detail').focus();
+}
+
+$('close-detail').addEventListener('click', () => $('business-detail').close());
+$('cancel-job').addEventListener('click', async () => {
+  if (!activeJob) return;
+  $('cancel-job').disabled = true;
+  try { await api(`/api/leadgen/jobs/${encodeURIComponent(activeJob)}/cancel`, {method: 'POST'}); }
+  catch (error) { showError(error); $('cancel-job').disabled = false; }
+});
+$('check-browser').addEventListener('click', async () => {
+  $('browser-health').textContent = 'Checking browser service…';
+  try {
+    const health = await (await api('/api/browser/health')).json();
+    $('browser-health').textContent = `${health.provider}: ${friendly(health.status)} · REST contract ${health.contract_version}`;
+  } catch (error) { showError(error); }
+});
 
 async function enterWorkspace() {
   const user = await (await api('/api/auth/me')).json();
@@ -175,7 +273,9 @@ async function enterWorkspace() {
   $('lg-btn').disabled = false;
   await showPage('dashboard');
   const jid = localStorage.getItem('lead_engine_job_' + currentUser);
-  if (jid) void pollJob(jid);
+  const jobs = await loadJobs();
+  const resume = jobs.find(job => ['queued', 'running'].includes(job.status));
+  if (jid || resume) void pollJob(jid || resume.id);
 }
 
 async function loadSettings() {

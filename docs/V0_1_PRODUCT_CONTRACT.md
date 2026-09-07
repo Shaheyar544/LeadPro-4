@@ -1,7 +1,7 @@
 # V0.1 product contract
 
 This fork is becoming a Local Business Lead Intelligence Engine for a single
-local workspace. Phase 3A is a foundation, not a production release.
+local workspace. Phase 3B adds persistent rendered evidence; this remains a local prototype.
 
 ## Input
 
@@ -31,33 +31,44 @@ over 200 characters, empty values, invalid states, unsupported profiles and
 unknown fields return field-specific 422 errors. Backend validation is authoritative.
 
 The country is fixed to United States. Category, city and state form the search
-query. The existing lead table remains: state appears in `source_query`, rather
-than a new dedicated column. The single opportunity profile identifies this
-workflow; structured search records and the new score belong to Phase 3B.
+query. Search jobs and businesses store state explicitly. The request profile maps
+to the versioned `website_conversion_v1` score. See the exact formula and
+applicability rules in [Phase 3B architecture](PHASE_3B_ARCHITECTURE.md).
 
 ## Current behavior
 
-Dashboard → Lead Generation → Leads → Settings. At least one Serper Maps,
-Google Places or Yelp API key is needed to start discovery, but no API key or
-OpenRouter client is required to boot. Missing discovery configuration returns
-503 before job creation. Yelp websites are left unknown instead of guessed.
+Dashboard → Lead Generation → Leads → Settings. One configured Serper Maps,
+Google Places or Yelp key is required to create a search; startup needs no live
+API keys or OpenRouter. Missing discovery configuration returns 503. A configured
+but unavailable CamoFox service produces stored browser_unavailable findings.
 
-Website checks read bounded HTTP HTML. There is no browser execution or
-contact/about crawling. New emails come only from explicit provider business
-emails or literal addresses observed in fetched HTML. These observations do
-not yet prove visible DOM evidence or mailbox ownership. No guessed/enriched
-contacts or inferred owner identities are newly collected. Existing records
-are preserved and may still contain contacts collected before Phase 3A.
+The official CamoFox REST service renders public business websites behind a
+browser-provider interface. The crawl is bounded to homepage, one contact/quote
+and one about or services page. Links must be observed, internal and safe; no
+paths, websites or emails are guessed. Yelp listing URLs are provenance only.
+Public mailto/tel and visible text contacts are normalized with source evidence.
+Provider phone evidence is labeled separately. Personal LinkedIn profiles are
+excluded; only company LinkedIn URLs can be business evidence.
 
-The old technology/scoring rules remain provisional; scores are labeled as
-legacy in the UI. The opportunity profile does not imply a new scoring model.
-CSV exports all saved businesses using a single server-side formula-safety policy.
+New normalized tables are authoritative. Legacy lead data is preserved separately
+without converting its booleans or historical enrichment into rendered evidence.
+Scores expose opportunity, digital gap, strength and two separate confidences.
+Unknown, blocked, failed and not-applicable findings do not count as feature gaps.
+Evidence detail includes pages, detectors, excerpts, sources, confidence, versions,
+timestamps and score explanation. CSV uses the same owner scope and formula safety.
 
-Jobs belong to the authenticated starter. Default capacity is one; excess
-requests return retryable 429. Closing the page does not cancel work, so there
-is no Stop button. Restart loses in-memory jobs and possibly buffered results.
-Discovery pagination is not improved here, so a search can return fewer results
-than requested even when its target is 100.
+Jobs persist across refreshes and restarts. Default execution is one job and two
+concurrent business audits. Up to ten active jobs per owner can queue; additional
+requests return 429/Retry-After. Cancellation is persistent, pending items stop
+immediately, and active work stops at a bounded safe boundary. SSE disconnection
+never cancels work. A stale lease is recovered within the 60-second lease window
+plus polling; completed items are not reprocessed.
+
+The target is a cap on unique discovered businesses, not a guaranteed number of
+sales-qualified contacts. `qualified_count` means enough evidence for a gap score.
+Discovery pages/quotas and unavailable websites can cause partial results. Google
+and Yelp pagination are bounded; Serper Maps currently uses one verified request
+contract and reports provider_limit for unmet targets. No quotas or blocks are bypassed.
 
 ## Explicitly out of scope
 
@@ -69,6 +80,6 @@ than requested even when its target is 100.
 - CAPTCHA bypass, login automation and form submission.
 
 Legacy source remains for later removal, but its router is never mounted.
-Feature flags cannot reactivate it in this release. Phase 3B will add the isolated
-Playwright worker, rendered evidence, contact/about crawling, persistent jobs,
-restart recovery, discovery pagination and a new deterministic opportunity score.
+Feature flags cannot reactivate it in this release. Phase 3C is not implemented.
+The browser is Firefox-based, not Chromium verification. SQLite is durable local
+storage, not a distributed queue or a production browser network sandbox.

@@ -1096,3 +1096,21 @@ th, td { text-align: left; vertical-align: top; padding: 12px; min-width: 120px;
   .stat-val { font-size: 28px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+/* Evidence details preserve neutral unknown/blocked states and keyboard access. */
+#business-detail { margin: auto; width: min(960px, 94vw); max-height: 90vh; overflow: auto; padding: 24px; border: 1px solid #64748b; border-radius: 12px; background: #111827; color: #f1f5f9; }
+#business-detail::backdrop { background: rgb(0 0 0 / 65%); }
+#business-detail p, #business-detail li, #business-detail blockquote { overflow-wrap: anywhere; }
+#business-detail h3 { margin: 24px 0 12px; }
+#close-detail { position: sticky; top: 0; background: #1e293b; }
+.score-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px; }
+.score-grid dd { margin: 0; font-weight: 600; }
+.evidence-list { display: grid; gap: 12px; }
+.evidence-card { padding: 14px; border: 1px solid #64748b; border-radius: 8px; }
+.evidence-card p { margin-top: 8px; font-size: .9rem; }
+.evidence-status { display: inline-block; padding: 3px 8px; border-radius: 5px; font-size: .8rem; font-weight: 500; background: #334155; color: #f1f5f9; }
+.status-present { background: #14532d; color: #dcfce7; }
+.status-absent { background: #713f12; color: #fef9c3; }
+.status-unknown, .status-blocked, .status-failed, .status-not_applicable { background: #334155; color: #e2e8f0; }
+#recent-jobs { display: grid; gap: 8px; list-style: none; padding: 0; }
+body.theme-light #business-detail { background: #fff; color: #0f172a; }
+@media (max-width: 600px) { #business-detail { padding: 16px; width: 96vw; } .score-grid { gap: 8px; } }

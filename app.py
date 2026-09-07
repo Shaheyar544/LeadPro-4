@@ -23,14 +23,23 @@ from jose import JWTError, jwt
 import bcrypt
 from product_models import LeadGenRequest
 from jobs import JobManager, CapacityExceeded
+from engine_store import EngineStore
+from engine_config import EngineConfig
+from engine_worker import PersistentWorker
+from engine_views import summary as business_summary, csv_export
+from dataclasses import asdict
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Local single-process startup: no network, mail, AI or scheduler clients."""
+    """Initialize local storage and resume durable searches; no outreach scheduler."""
     from database import init_db
     init_db()
     _ensure_default_admin()
-    yield
-    await job_manager.shutdown()
+    evidence_worker.start()
+    try:
+        yield
+    finally:
+        await evidence_worker.shutdown()
+        await job_manager.shutdown()
 
 
 app = FastAPI(title="Local Business Lead Intelligence Engine", lifespan=lifespan)
@@ -164,7 +173,10 @@ def _ensure_default_admin():
 
 
 _PIXEL = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
-job_manager = JobManager(config.MAX_CONCURRENT_TASKS)
+job_manager = JobManager(config.MAX_CONCURRENT_TASKS)  # Unmounted legacy handlers only.
+engine_store = EngineStore(config.DB_PATH)
+engine_settings = EngineConfig()
+evidence_worker = PersistentWorker(engine_store, engine_settings)
 # These objects belong exclusively to unmounted legacy handlers.
 _background_tasks: set = set()
 _audit_email_sem = asyncio.Semaphore(10)
@@ -403,13 +415,11 @@ def health_check():
 
 @app.get("/api/stats")
 def api_stats(user: str = Depends(get_current_user)):
-    from database import get_conn
-    with get_conn() as conn:
-        row = conn.execute("SELECT COUNT(*) AS total, "
-                           "SUM(CASE WHEN email IS NOT NULL AND email NOT IN ('','N/A') THEN 1 ELSE 0 END) AS with_email, "
-                           "SUM(CASE WHEN website IS NOT NULL AND website != '' THEN 1 ELSE 0 END) AS with_website FROM leads").fetchone()
-    return {"total": row["total"], "with_email": row["with_email"] or 0,
-            "with_website": row["with_website"] or 0, "active_jobs": job_manager.active}
+    with engine_store.transaction() as conn:
+        row = conn.execute("SELECT count(DISTINCT b.id) total, count(DISTINCT CASE WHEN b.website_url!='' THEN b.id END) with_website FROM businesses b JOIN search_job_items i ON i.business_id=b.id JOIN search_jobs j ON j.id=i.job_id WHERE j.user_id=?", (user,)).fetchone()
+        emails = conn.execute("SELECT count(DISTINCT c.business_id) FROM business_contacts c JOIN audit_runs r ON r.id=c.audit_run_id JOIN search_job_items i ON i.id=r.job_item_id JOIN search_jobs j ON j.id=i.job_id WHERE j.user_id=? AND c.contact_type='email'", (user,)).fetchone()[0]
+        active = conn.execute("SELECT count(*) FROM search_jobs WHERE user_id=? AND status IN ('queued','running')", (user,)).fetchone()[0]
+    return {"total": row["total"], "with_email": emails, "with_website": row["with_website"], "active_jobs": active}
 
 
 @legacy_routes.get("/api/smtp/test")
@@ -497,38 +507,16 @@ async def api_lead_batches(user: str = Depends(get_current_user)):
 
 # ── Leads ──
 @app.get("/api/leads")
-async def api_leads(min_score:int=0,country:str="",service:str="",has_email:bool=False,
-                    sort:str="lead_score",limit:int=Query(100, ge=1, le=100),offset:int=Query(0, ge=0),
+async def api_leads(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0),
                     user: str = Depends(get_current_user)):
-    from database import get_conn
-    valid_sorts = {"lead_score","ops_score","intent_score","estimated_monthly_loss","rating"}
-    sort_col = sort if sort in valid_sorts else "lead_score"
+    ids, total = engine_store.result_ids(user, limit, offset)
+    return {"leads": [business_summary(engine_store.detail(bid, user)) for bid in ids], "total": total}
 
-    clauses,params = ["lead_score >= ?"], [min_score]
-    if country: clauses.append("LOWER(country)=?"); params.append(country.lower())
-    if service: clauses.append("ideal_service=?"); params.append(service)
-    if has_email: clauses.append("email IS NOT NULL AND email!='' AND email!='N/A'")
-    where = " AND ".join(clauses)
-    cp=list(params); params+=[limit,offset]
-    with get_conn() as conn:
-        rows = conn.execute(
-            f"SELECT id,place_id,business_name,email,phone,website,city,country,"
-            f"niche,rating,review_count,pain_points,ideal_service,lead_score,"
-            f"ops_score,intent_score,estimated_monthly_loss,"
-            f"tech_stack_json,ops_pain_points,"
-            f"source_query,scraped_at "
-            f"FROM leads WHERE {where} ORDER BY {sort_col} DESC LIMIT ? OFFSET ?", params
-        ).fetchall()
-        total = conn.execute(f"SELECT COUNT(*) FROM leads WHERE {where}",cp).fetchone()[0]
-    return {"leads":[dict(r) for r in rows],"total":total}
 
 @app.get("/api/leads/filters")
 async def api_lead_filters(user: str = Depends(get_current_user)):
-    from database import get_conn
-    with get_conn() as conn:
-        countries=[r[0] for r in conn.execute("SELECT DISTINCT country FROM leads WHERE country IS NOT NULL ORDER BY country").fetchall()]
-        services=[r[0] for r in conn.execute("SELECT DISTINCT ideal_service FROM leads WHERE ideal_service IS NOT NULL ORDER BY ideal_service").fetchall()]
-    return {"countries":countries,"services":services}
+    return {"profiles": ["website_conversion_v1"]}
+
 
 @legacy_routes.get("/api/leads/{lead_id}/preview-email")
 async def api_preview_email(lead_id: int, user: str = Depends(get_current_user)):
@@ -582,32 +570,78 @@ async def api_gen_audit_page(lead_id: int, user: str = Depends(get_current_user)
 # ── Lead Gen ──
 @app.post("/api/leadgen/start", status_code=202)
 async def api_start_leadgen(req: LeadGenRequest, user: str = Depends(get_current_user)):
-    sources = [name for name, key in (("serper_maps", config.SERPER_API_KEY),
-               ("google_places", config.GOOGLE_PLACES_API_KEY), ("yelp", config.YELP_API_KEY)) if key]
-    if not sources:
+    from discovery import configured_sources
+    if not (evidence_worker.sources if evidence_worker.sources is not None else configured_sources()):
         raise HTTPException(503, "Configure a discovery provider API key and restart before starting a search")
-
-    async def run(job):
-        from leadgen import run_engine_web
-        await run_engine_web(country="United States", target=req.target_count, queue=job,
-                             industry=req.category, city=req.city, state=req.state,
-                             include_clean_leads=True, source_selection=sources)
     try:
-        job = job_manager.start(user, run)
-    except CapacityExceeded:
-        raise HTTPException(429, "Job capacity reached. Retry after the current job finishes.",
-                            headers={"Retry-After": "10"}) from None
-    return {"job_id": job.id, "status": job.status}
+        job = engine_store.create_job(user, req)
+    except ValueError:
+        raise HTTPException(429, "Job queue capacity reached", headers={"Retry-After": "10"}) from None
+    evidence_worker.notify()
+    return {"job_id": job["id"], "status": job["status"]}
 
 
+def persistent_job(jid, user):
+    job = engine_store.job(jid, user)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    return job
+
+
+@app.get("/api/leadgen/jobs")
+async def api_jobs(user: str = Depends(get_current_user)):
+    return engine_store.list_jobs(user)
+
+
+@app.get("/api/leadgen/jobs/{jid}")
 @app.get("/api/leadgen/status/{jid}")
 async def api_lg_status(jid: str, after: int = Query(0, ge=0), user: str = Depends(get_current_user)):
-    return owned_job(jid, user).snapshot(after)
+    return persistent_job(jid, user)
+
+
+@app.get("/api/leadgen/jobs/{jid}/items")
+async def api_job_items(jid: str, limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0), user: str = Depends(get_current_user)):
+    persistent_job(jid, user)
+    return engine_store.items(jid, user, limit, offset)
+
+
+@app.post("/api/leadgen/jobs/{jid}/cancel")
+async def api_job_cancel(jid: str, user: str = Depends(get_current_user)):
+    job = engine_store.cancel(jid, user)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    evidence_worker.notify()
+    return job
 
 
 @app.get("/api/leadgen/stream/{jid}")
 async def api_lg_stream(jid: str, user: str = Depends(get_current_user)):
-    return _sse(owned_job(jid, user))
+    persistent_job(jid, user)
+    async def updates():
+        previous = None
+        while True:
+            job = engine_store.job(jid, user)
+            if job != previous:
+                yield f"data: {json.dumps(job)}\n\n"
+                previous = job
+            if job["status"] not in {"queued", "running"}:
+                return
+            yield ": keepalive\n\n"
+            await asyncio.sleep(1)
+    return StreamingResponse(updates(), media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/browser/health")
+async def api_browser_health(user: str = Depends(get_current_user)):
+    return asdict(await evidence_worker.browser.health())
+
+
+@app.get("/api/businesses/{bid}")
+async def api_business_detail(bid: str, user: str = Depends(get_current_user)):
+    detail = engine_store.detail(bid, user)
+    if detail is None:
+        raise HTTPException(404, "Business not found")
+    return detail
 
 
 # ── Outreach ──
@@ -1119,7 +1153,7 @@ async def api_get_config(_=Depends(require_admin)):
     pending = dotenv_values(Path(__file__).parent / ".env", interpolate=False)
     return {"providers": {key: bool(pending.get(key, getattr(config, key, "")))
                           for key in sorted(_PROVIDER_KEYS)},
-            "max_concurrent_tasks": config.MAX_CONCURRENT_TASKS,
+            "max_concurrent_tasks": 1,
             "outreach_enabled": config.OUTREACH_ENABLED,
             "public_audit_enabled": config.PUBLIC_AUDIT_ENABLED,
             "scheduler_enabled": config.SCHEDULER_ENABLED}
@@ -1162,41 +1196,15 @@ async def search_leads(request: Request, q: str, limit: int = 50, _=Depends(get_
 
 
 @app.get("/api/leads/export/csv")
-def export_leads_csv_v4(_=Depends(get_current_user)):
-    import csv
-    import io
-    from database import get_conn
-    from utils import csv_safe_cell
-    columns = ["business_name", "website", "email", "phone", "address", "city", "country",
-               "niche", "rating", "review_count", "lead_score", "pain_points", "source_query", "scraped_at"]
-
-    def rows():
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(columns)
-        yield output.getvalue()
-        last_id = 0
-        while True:
-            # Keyset batches, short transactions and a bounded memory footprint.
-            with get_conn() as conn:
-                batch = conn.execute(f"SELECT id,{','.join(columns)} FROM leads WHERE id > ? ORDER BY id LIMIT 100",
-                                     (last_id,)).fetchall()
-            if not batch:
-                return
-            output.seek(0)
-            output.truncate(0)
-            for row in batch:
-                writer.writerow([csv_safe_cell(row[column]) for column in columns])
-            last_id = batch[-1]["id"]
-            yield output.getvalue()
-    return StreamingResponse(rows(), media_type="text/csv",
-                             headers={"Content-Disposition": "attachment; filename=leads.csv"})
+async def export_leads_csv(user: str = Depends(get_current_user)):
+    return StreamingResponse(csv_export(engine_store, user), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": 'attachment; filename="lead-engine-businesses.csv"'})
 
 
 class BulkLeadRequest(BaseModel):
-    operation: str          # "assign" | "tag" | "untag" | "pipeline" | "delete"
+    operation: str
     lead_ids: List[int]
-    value: Optional[str] = None  # assignee / tag / stage
+    value: Optional[str] = None
 
 
 @legacy_routes.post("/api/leads/bulk")

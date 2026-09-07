@@ -1,4 +1,4 @@
-# Phase 3A security foundation
+# Security foundation: Phase 3A and Phase 3B
 
 **Not production-ready.** Run locally with one Uvicorn process. These are
 implemented boundaries and remaining limitations, not a security certification.
@@ -15,8 +15,8 @@ summaries/recommendations and outreach analytics. They are absent from OpenAPI.
 Setting outreach/public flags true explicitly fails startup; these flags cannot
 opt into unreviewed legacy behavior. No scheduler is started by the app.
 Scheduler entry points and sending callbacks also check the outreach flag.
-Startup creates no outreach/AI/proposal client and performs no FX or external
-API requests. Retained old modules are unsupported as standalone programs.
+Startup creates no outreach/AI/proposal client and performs no FX requests.
+An idle database needs no network; persisted queued searches resume automatically. Retained old modules are unsupported as standalone programs.
 
 The active auditor does not call guessed-email, Hunter, Clearbit or owner
 inference helpers. Personal LinkedIn/owner search routes are unmounted. Existing
@@ -24,9 +24,10 @@ database contents are preserved, including any historical enriched contacts.
 
 ## Website fetching / SSRF
 
-All active direct business-website fetching uses `url_safety.safe_fetch_html`,
-including provider URLs and the compatibility `_fetch_website` helper. The
-provider session is deliberately not reused for websites.
+Retained HTTP compatibility checks use `url_safety.safe_fetch_html` and the
+compatibility `_fetch_website` helper. Provider credentials are never reused for
+website requests. The following pinned-HTTP guarantees apply to that client; the
+active Phase 3B browser boundary is described separately below.
 
 - Absolute HTTP/HTTPS only, maximum 2,048 characters. Reject whitespace/control
   characters, backslashes, credentials, invalid hostnames and IPv6 scope IDs.
@@ -56,7 +57,7 @@ attribution terms before discovery.
 **Application validation alone does not fully solve DNS rebinding.** Pinning
 closes the obvious second DNS lookup race in this client, but network routing,
 translation mechanisms and future browser/subresource requests need protection
-too. Phase 3B/production must isolate workers and enforce network-level egress
+too. Production must isolate workers and enforce network-level egress
 rules against private/local/metadata destinations for every request, without
 application credentials or access to internal services.
 
@@ -64,7 +65,45 @@ Outcomes: ok, blocked, rate_limited, not_found, timeout, tls_error, unsafe_url,
 network_error, http_error, redirect_limit, body_too_large, unsupported_content.
 403/429 and other failed checks do not prove a dead website. The legacy schema
 stores this classification as a preliminary finding. Structured audit status
-and evidence are Phase 3B work.
+and evidence now live in the separate Phase 3B tables.
+
+## Phase 3B browser boundary
+
+The active worker uses the official CamoFox REST provider. `normalize_url` and
+`resolve_public` run before top-level/candidate navigation. Returned URLs, rendered
+location and viewport/capture locations are checked again. Candidate pages are
+same-host (www alias allowed); unsafe redirects terminate the audit and trigger
+session teardown. No HTTP TLS downgrade, authentication, form submission, CAPTCHA
+solving, login automation, social interactions or proxy rotation is implemented.
+
+**These REST checks cannot intercept intermediate redirects/subresources or pin
+Firefox DNS.** The remote browser may contact a private resource before Python
+observes a redirect. No production egress sandbox is delivered in Phase 3B. Run
+locally with a separate service account/environment; production requires browser
+container/network isolation blocking private/local/metadata access for every
+request, plus prevention of access to application files and credentials.
+
+CamoFox's base URL is operator environment configuration, never a request field.
+Non-loopback configuration requires CAMOFOX_ACCESS_KEY. Bearer authorization is
+centralized, raw provider errors are discarded, and no access key is returned
+by health/config. The upstream health route is unauthenticated, so health alone
+does not verify key authorization. CAMOFOX_API_KEY (cookie import) is not used.
+The setup guide disables crash reports, persistence and VNC using official
+supported settings; the app cannot attest to an externally launched service's
+configuration. See [CamoFox setup](CAMOFOX_SETUP.md) for the pinned source contract.
+
+Each audit has independent random context IDs. Tab and session cleanup runs in
+finally; timed-out or interrupted cleanup is durably marked and retried after
+recovery. No browser storage state is imported or shared. Service-side idle expiry
+is an additional fallback. An unavailable service cannot guarantee immediate
+remote deletion. Screenshots are opt-in, generated filenames in an ignored local
+folder; only metadata goes in SQLite. No public artifact endpoint exists.
+
+Full HTML, full visible text, cookie jars, localStorage, traces and raw snapshots
+are not persisted. DOM extraction returns bounded facts and small contact/evidence
+excerpts. Structured worker logs contain IDs, phase/provider, normalized error
+code and duration, never page content, email lists, URL queries, keys or raw
+exceptions. Retain browser service logs privately according to local policy.
 
 ## Auth, secrets and configuration
 
@@ -111,23 +150,23 @@ batches apply to all exported fields. Preserve escaping in downstream tools.
 
 ## Jobs and operations
 
-MAX_CONCURRENT_TASKS defaults to 1, clamped to 1–5. Capacity is reserved on the
-single app loop before scheduling; excess work returns 429/Retry-After: 10.
-There is no unbounded queue. Per-job website concurrency SCRAPE_THREADS defaults
-to 2, clamped to 1–5. Input and engine enforce target_count 1–100 and prevent
-batch overshoot.
+Phase 3B uses additive migration 50 and SQLite WAL. One persistent job executes
+at a time, with a bounded queue of ten active jobs per owner, browser concurrency
+at most two and target_count 1–100. Short BEGIN IMMEDIATE transactions claim
+jobs/items; a 60-second lease and ten-second heartbeat fence stale writers.
+Completed items survive restart. Interrupted attempts are retained and retried
+from the business start at most three times; opaque session IDs permit cleanup.
+No network operation is held inside a database transaction.
 
-Jobs use full UUID4 IDs, authenticated status/SSE and starter ownership. Missing
-and other-user jobs both return 404. Reads are non-destructive and disconnects
-do not cancel work. Retain at most 200 events/job and 2,000 characters/message.
-Completed jobs expire after an hour and are capped at approximately 100 on
-subsequent access. Shutdown requests cancellation; the UI offers no misleading
-Stop control. Restart loses job state and potentially uncommitted batches.
+Jobs, item lists, detail, results, exports and browser diagnostics require bearer
+authentication. Jobs and business audit results are scoped to the starter; another
+user receives 404. Cancellation is persisted, pending work is cancelled and active
+sessions close at a bounded safe boundary. Disconnects do not cancel jobs. The
+UI reconnects using saved server state. This does not implement multi-tenant SaaS.
 
-Limits are **not distributed**: use one worker and no reload. Durable jobs,
-restart recovery and cross-process claiming belong to Phase 3B. Legacy schema,
-scoring heuristics, provider errors, data provenance and pagination need further
-work. No Playwright crawler is implemented here.
+Use one process and no reload. There is no distributed queue, Redis, PostgreSQL or
+production worker network sandbox. Legacy scoring is not used by the new pipeline.
+Provider quotas and blocks result in partial/unknown outcomes, not bypass attempts.
 
 Health returns 200/status ok on DB success and 503/status unavailable on critical
 DB failure, without internal exception details.
@@ -135,8 +174,8 @@ DB failure, without internal exception details.
 ## Dependencies and tests
 
 Unused pandas/tqdm/timezonefinder requirements were removed after import searches.
-fpdf2 and Twilio remain for retained legacy imports. Playwright stays for Phase
-3B and is not imported by the product. Pydantic and test-only httpx are explicit.
+fpdf2 and Twilio remain for retained legacy imports. Playwright stays for local
+DOM/UI tests and is not imported by the active browser provider. Pydantic and test-only httpx are explicit.
 python-jose now requires >=3.4.0,<4: the maintainer's
 [3.4.0 release](https://github.com/mpdavis/python-jose/releases/tag/3.4.0)
 documents CVE-2024-33663 and CVE-2024-33664 fixes. No sweeping upgrade or full
@@ -145,4 +184,6 @@ supply-chain assessment was performed.
 Run `python -m unittest discover -s tests -v` and `python -m compileall .`.
 Tests use temporary data and mocked DNS/HTTP/providers, with no live messaging,
 mailboxes, discovery or scraping. A separate local UI smoke check may use an
-installed browser; this is not the Phase 3B worker.
+installed Edge browser with external requests blocked; the active business
+provider remains CamoFox. Live CamoFox integration is explicitly opt-in and visits
+only example.com. Live discovery/pilots require intentionally configured keys.

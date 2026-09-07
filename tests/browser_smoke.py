@@ -35,13 +35,15 @@ def main():
                "SERPER_API_KEY": "", "GOOGLE_PLACES_API_KEY": "", "YELP_API_KEY": "",
                "OPENROUTER_API_KEY": "", "PAGESPEED_API_KEY": "", "HUNTER_API_KEY": "", "CLEARBIT_API_KEY": "",
                "OUTREACH_ENABLED": "false", "PUBLIC_AUDIT_ENABLED": "false",
-               "SCHEDULER_ENABLED": "false", "VERIFY_SSL": "true", "MAX_CONCURRENT_TASKS": "1"}
+               "SCHEDULER_ENABLED": "false", "VERIFY_SSL": "true", "MAX_CONCURRENT_TASKS": "1",
+               "BROWSER_PROVIDER": "camofox", "CAMOFOX_BASE_URL": "http://127.0.0.1:9377", "CAMOFOX_ACCESS_KEY": "",
+               "CAMOFOX_PAGE_SETTLE_MS": "0", "AUDIT_SCREENSHOTS_ENABLED": "false"}
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         base = f"http://127.0.0.1:{port}"
         with (data / "server.log").open("w+", encoding="utf-8") as log:
-            process = subprocess.Popen([sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1",
+            process = subprocess.Popen([sys.executable, "-m", "uvicorn", "tests.smoke_app:app", "--host", "127.0.0.1",
                                         "--port", str(port), "--no-proxy-headers"], cwd=data, env=env,
                                        stdout=log, stderr=log,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -58,11 +60,7 @@ def main():
                 else:
                     raise AssertionError("Local startup timed out")
 
-                payload = '\"><img src=x onerror="window.__xss=1"> Fixture Business'
-                with closing(sqlite3.connect(data / "smoke.db")) as conn:
-                    conn.execute("INSERT INTO leads (place_id,business_name,website,email,phone,city,country,pain_points,lead_score) VALUES (?,?,?,?,?,?,?,?,?)",
-                                 ("ui-fixture", payload, "javascript:window.__xss=1", "=SUM(1,2)", "+15551234567", "Austin", "United States", json.dumps([payload]), 40))
-                    conn.commit()
+                payload = '=SUM(1,2) <img src=x onerror="window.__xss=1"> Fixture Business'
 
                 with sync_playwright() as playwright:
                     browser = playwright.chromium.launch(channel="msedge", headless=True)
@@ -77,31 +75,65 @@ def main():
                     page.locator("#password").fill(password)
                     page.get_by_role("button", name="Sign in", exact=True).click()
                     page.locator("#layout").wait_for(state="visible")
-                    page.wait_for_function("() => document.getElementById('s-total').textContent === '1'")
                     assert page.locator("nav [data-page]").count() == 4
-                    page.get_by_role("button", name="Leads", exact=True).click()
-                    page.locator("#lead-rows tr").wait_for()
-                    assert payload in page.locator("#lead-rows").inner_text()
-                    assert page.locator("#lead-rows img").count() == 0
-                    assert page.locator("#lead-rows a").count() == 0
-                    assert page.evaluate("typeof window.__xss") == "undefined"
-                    with page.expect_download() as download:
-                        page.get_by_role("button", name="Export all businesses (CSV)").click()
-                    downloaded = Path(download.value.path()).read_text(encoding="utf-8")
-                    assert "'=SUM(1,2)" in downloaded and "'+15551234567" in downloaded
-
                     page.get_by_role("button", name="Lead Generation", exact=True).click()
                     page.locator("#category").fill("Plumber")
                     page.locator("#city").fill("Austin")
                     page.locator("#state").fill("ZZ")
-                    page.locator("#target_count").fill("100")
+                    page.locator("#target_count").fill("2")
                     page.get_by_role("button", name="Start search", exact=True).click()
                     page.wait_for_function("() => document.getElementById('state').getAttribute('aria-invalid') === 'true'")
                     assert page.locator("#lg-errors").evaluate("node => node === document.activeElement")
                     page.locator("#state").fill("Texas")
-                    page.get_by_role("button", name="Start search", exact=True).click()
-                    page.get_by_text("Configure a discovery provider API key and restart before starting a search", exact=True).wait_for()
-                    assert page.get_by_role("button", name="Stop", exact=True).count() == 0
+                    with page.expect_response(lambda response: response.url.endswith('/api/leadgen/start') and response.status == 202) as start:
+                        page.get_by_role("button", name="Start search", exact=True).click()
+                    jid = start.value.json()["job_id"]
+                    page.reload()
+                    page.locator("#layout").wait_for(state="visible")
+                    page.get_by_role("button", name="Lead Generation", exact=True).click()
+                    page.wait_for_function("() => document.getElementById('job-state').textContent.includes('partial')", timeout=30000)
+                    assert 'Discovered 2 / 2' in page.locator('#job-log').inner_text()
+                    page.get_by_role("button", name="Leads", exact=True).click()
+                    page.locator("#lead-rows tr").first.wait_for()
+                    row = page.locator('#lead-rows tr').filter(has_text=payload)
+                    assert row.count() == 1
+                    assert page.locator('#lead-rows img').count() == 0
+                    assert page.evaluate("typeof window.__xss") == "undefined"
+                    row.get_by_role('button', name='View evidence').click()
+                    page.locator('#business-detail').wait_for(state='visible')
+                    assert 'office@public-business.test' in page.locator('#detail-content').inner_text()
+                    assert page.locator('#detail-content img').count() == 0
+                    assert page.locator('#detail-content .status-unknown').count() > 0
+                    page.screenshot(path=str(args.artifact_dir / 'business-evidence.png'), full_page=True)
+                    page.get_by_role('button', name='Close details').click()
+                    blocked = page.locator('#lead-rows tr').filter(has_text='Blocked business')
+                    blocked.get_by_role('button', name='View evidence').click()
+                    page.locator('#business-detail').wait_for(state='visible')
+                    assert page.locator('#detail-content .status-blocked').count() > 0
+                    assert 'Unknown' in page.locator('#detail-content').inner_text()
+                    page.get_by_role('button', name='Close details').click()
+                    with page.expect_download() as download:
+                        page.get_by_role("button", name="Export all businesses (CSV)").click()
+                    downloaded = Path(download.value.path()).read_text(encoding='utf-8')
+                    assert "'=SUM(1,2)" in downloaded and "'+15125551234" in downloaded
+                    page.get_by_role("button", name="Lead Generation", exact=True).click()
+                    page.locator('#category').fill('Plumber')
+                    page.locator('#city').fill('Austin'); page.locator('#state').fill('TX'); page.locator('#target_count').fill('2')
+                    page.get_by_role('button', name='Start search', exact=True).click()
+                    page.locator('#cancel-job:not([disabled])').wait_for()
+                    page.get_by_role('button', name='Cancel job', exact=True).click()
+                    page.wait_for_function("() => document.getElementById('job-state').textContent.includes('cancelled')", timeout=30000)
+                    page.locator('#category').fill('Offline')
+                    page.locator('#target_count').fill('1')
+                    page.get_by_role('button', name='Start search', exact=True).click()
+                    page.wait_for_function("() => document.getElementById('job-state').textContent.includes('Offline') && document.getElementById('job-state').textContent.includes('partial')", timeout=30000)
+                    page.get_by_role('button', name='Leads', exact=True).click()
+                    page.locator('#lead-rows tr').filter(has_text=payload).get_by_role('button', name='View evidence').click()
+                    page.locator('#business-detail').wait_for(state='visible')
+                    assert 'Browser service is unavailable' in page.locator('#detail-content').inner_text()
+                    assert page.locator('#detail-content .status-failed').count() > 0
+                    page.get_by_role('button', name='Close details').click()
+                    page.get_by_role("button", name="Lead Generation", exact=True).click()
                     page.screenshot(path=str(args.artifact_dir / "leadgen-desktop.png"), full_page=True)
                     page.set_viewport_size({"width": 375, "height": 812})
                     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -113,8 +145,18 @@ def main():
                     assert not any(page.locator("#provider-fields input").nth(i).input_value() for i in range(5))
                     page.get_by_role("button", name="Toggle theme").click()
                     page.screenshot(path=str(args.artifact_dir / "settings-mobile-light.png"), full_page=True)
+                    # A response arriving after logout must not reopen sensitive details.
+                    page.get_by_role("button", name="Leads", exact=True).click()
+                    page.locator('#lead-rows tr').first.wait_for()
+                    pending_detail = []
+                    page.route('**/api/businesses/*', lambda route: pending_detail.append(route))
+                    page.locator('#lead-rows tr').first.get_by_role('button', name='View evidence').click()
                     page.get_by_role("button", name="Sign out", exact=True).click()
                     page.locator("#login-panel").wait_for(state="visible")
+                    assert len(pending_detail) == 1
+                    pending_detail[0].continue_()
+                    page.wait_for_timeout(200)
+                    assert not page.locator('#business-detail').is_visible()
                     assert not errors, errors
                     forbidden = ("/api/outreach", "/api/warmup", "/api/whatsapp", "/api/smtp", "/api/brevo", "/api/intel", "/api/campaigns", "/api/proposals")
                     assert not any(any(path in url for path in forbidden) for url in requests)
@@ -123,7 +165,7 @@ def main():
                 log.seek(0)
                 output = log.read()
                 assert password not in output and env["JWT_SECRET"] not in output
-                print("PASS: Windows startup, real login, four-page UI, stored-XSS fixtures, CSV download, backend errors, mobile layout, settings and logout; no retired API calls or JS errors.")
+                print("PASS: Windows startup and real login; persistent search, refresh recovery, cancellation, blocked/offline evidence, detailed scores, stored-XSS fixtures, CSV download, validation, mobile layout, settings and logout; no retired API calls or JS errors.")
             finally:
                 if os.name == "nt" and process.poll() is None:
                     # Windows venv redirectors can have a Python child; stop only

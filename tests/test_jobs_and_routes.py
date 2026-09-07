@@ -13,6 +13,8 @@ import httpx
 from jobs import Job, JobManager, CapacityExceeded
 from tests.support import app, config, database, TEST_ENV
 from tests.test_inputs_and_secrets import VALID
+from tests.engine_fixtures import FixtureStore, FixtureSource, business, facts
+from product_models import LeadGenRequest
 
 
 class JobTests(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +96,10 @@ class RouteTests(unittest.TestCase):
         self.manager_patch = patch.object(app, "job_manager", JobManager())
         self.manager_patch.start()
         self.addCleanup(self.manager_patch.stop)
+        self.fixture = FixtureStore()
+        self.addCleanup(self.fixture.close)
+        store_patch = patch.object(app, "engine_store", self.fixture.store)
+        store_patch.start(); self.addCleanup(store_patch.stop)
 
     def test_every_legacy_route_unmounted_and_returns_404(self):
         self.assertFalse(config.OUTREACH_ENABLED)
@@ -114,17 +120,17 @@ class RouteTests(unittest.TestCase):
             self.assertNotIn(route.path, active)
 
     def test_job_status_and_stream_auth_ownership_and_query_token(self):
-        job = Job("alice", status="completed")
-        app.job_manager.jobs[job.id] = job
+        job = self.fixture.job()
+        self.fixture.store.cancel(job["id"], "alice")
         for family in ("status", "stream"):
-            path = f"/api/leadgen/{family}/{job.id}"
+            path = f"/api/leadgen/{family}/{job["id"]}"
             self.assertEqual(self.client.get(path).status_code, 401)
             self.assertEqual(self.client.get(path, params={"token": self.token}).status_code, 401)
             self.assertEqual(self.client.get(path, headers=self.headers).status_code, 200)
             bob = {"Authorization": "Bearer " + app.create_access_token({"sub": "bob"})}
             self.assertEqual(self.client.get(path, headers=bob).status_code, 404)
             self.assertEqual(self.client.get(f"/api/leadgen/{family}/missing", headers=self.headers).status_code, 404)
-        self.assertIs(app.job_manager.get(job.id, "alice"), job)
+        self.assertEqual(self.fixture.store.job(job["id"], "alice")["status"], "cancelled")
 
     def test_backend_input_validation_before_job(self):
         for update in ({"target_count": 0}, {"target_count": 101}, {"category": ""}, {"state": "ZZ"}, {"opportunity_profile": "email"}):
@@ -139,7 +145,8 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(app.job_manager.active, 0)
 
     def test_capacity_exhaustion_returns_retryable_429(self):
-        app.job_manager.active = 1
+        for _ in range(10):
+            self.fixture.job()
         with patch.object(config, "SERPER_API_KEY", "fixture"):
             response = self.client.post("/api/leadgen/start", json=VALID, headers=self.headers)
         self.assertEqual(response.status_code, 429)
@@ -174,16 +181,25 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.json(), {"status": "unavailable"})
 
     def test_csv_endpoint_neutralizes_formula_and_keeps_quoting(self):
-        with database.get_conn() as conn:
-            conn.execute("DELETE FROM leads")
-            conn.execute("INSERT INTO leads (place_id,business_name,email,phone,source_query) VALUES (?,?,?,?,?)",
-                         ("csv-fixture", '=HYPERLINK("https://example.org")', "@formula", "+15551234567", 'Austin, "TX"'))
+        job = self.fixture.job()
+        store = self.fixture.store
+        store.claim_job("fixture")
+        store.save_discovery(job["id"], "fixture", [business(canonical_name='=HYPERLINK("https://example.org")', city='Austin, "TX"')], {})
+        item = store.claim_item(job["id"], "fixture")
+        from browser.mock import MockBrowserProvider
+        from browser.base import BrowserSession
+        rid = store.start_run(item, "fixture", MockBrowserProvider(), BrowserSession("fixture", "fixture"))
+        from audit_engine.scoring import score_audit
+        result = dict(status="completed", pages=[], evidence=[], contacts=[
+            dict(type="email", display="@formula", normalized="@formula", source_url="https://business.test/", evidence_type="fixture", confidence=0.5),
+            dict(type="phone", display="+15551234567", normalized="+15551234567", source_url="https://business.test/", evidence_type="fixture", confidence=0.5)])
+        store.finish_run(job["id"], item, "fixture", rid, result, score_audit(business(), result))
         response = self.client.get("/api/leads/export/csv", headers=self.headers)
         row = list(csv.DictReader(io.StringIO(response.text)))[0]
         self.assertTrue(row["business_name"].startswith("'="))
-        self.assertEqual(row["email"], "'@formula")
-        self.assertEqual(row["phone"], "'+15551234567")
-        self.assertEqual(row["source_query"], 'Austin, "TX"')
+        self.assertEqual(row["emails"], "'@formula")
+        self.assertEqual(row["phones"], "'+15551234567")
+        self.assertEqual(row["city"], 'Austin, "TX"')
         self.assertNotIn("decision_maker", row)
 
     def test_security_headers_static_assets_and_no_inline_js(self):
@@ -210,23 +226,31 @@ class RouteTests(unittest.TestCase):
 
 
 class RouteJobIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_start_uses_normalized_contract_and_bounded_manager(self):
-        from leadgen import run_engine_web
-        mock_run = AsyncMock()
-        manager = JobManager(1)
+    async def test_start_uses_normalized_contract_and_persistent_worker(self):
+        from engine_worker import PersistentWorker
+        from engine_config import EngineConfig
+        from audit_engine.runner import AuditEngine
+        from browser.mock import MockBrowserProvider
+        fixture = FixtureStore()
+        self.addCleanup(fixture.close)
+        browser = MockBrowserProvider({"https://business.test/": facts()})
+        settings = EngineConfig(settle_ms=0)
+        worker = PersistentWorker(fixture.store, settings, browser, [FixtureSource()],
+                                  AuditEngine(browser, settings, validate=AsyncMock(side_effect=lambda x: x)))
         headers = {"Authorization": "Bearer " + app.create_access_token({"sub": "alice"})}
         with patch.object(database, "get_user", return_value={"username": "alice", "role": "admin"}), \
-             patch.object(config, "SERPER_API_KEY", "fixture"), patch.object(app, "job_manager", manager), \
-             patch("leadgen.run_engine_web", mock_run):
+             patch.object(app, "engine_store", fixture.store), patch.object(app, "evidence_worker", worker):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url="http://test") as client:
-                response = await client.post("/api/leadgen/start", json={**VALID, "state": "Texas"}, headers=headers)
+                response = await client.post("/api/leadgen/start", json={**VALID, "state": "Texas", "target_count": 1}, headers=headers)
                 self.assertEqual(response.status_code, 202)
-                await asyncio.gather(*manager.tasks)
                 jid = response.json()["job_id"]
+                saved = fixture.store.job(jid)
+                self.assertEqual((saved["city"], saved["state"], saved["status"]), ("Austin", "TX", "queued"))
+                await worker.run_once()
                 self.assertEqual((await client.get(f"/api/leadgen/status/{jid}", headers=headers)).json()["status"], "completed")
-        kwargs = mock_run.call_args.kwargs
-        self.assertEqual((kwargs["city"], kwargs["state"], kwargs["target"]), ("Austin", "TX", 25))
-        self.assertEqual(kwargs["source_selection"], ["serper_maps"])
+                self.assertEqual((await client.get(f"/api/leadgen/jobs/{jid}/items", headers=headers)).status_code, 200)
+                bids, _ = fixture.store.result_ids("alice")
+                self.assertEqual((await client.get(f"/api/businesses/{bids[0]}", headers=headers)).status_code, 200)
 
 
 class StartupTests(unittest.TestCase):

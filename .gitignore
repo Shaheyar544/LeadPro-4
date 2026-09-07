@@ -22,3 +22,11 @@ htmlcov/
 playwright-report/
 test-results/
 .jwt_secret-*
+
+# Browser runtime and evidence artifacts must stay local.
+audit_artifacts/
+node_modules/
+camofox-browser/
+.camofox/
+browser-profiles/
+*.trace.zip
