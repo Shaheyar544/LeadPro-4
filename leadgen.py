@@ -20,7 +20,6 @@ from config import (
     YELP_API_KEY, VERIFY_SSL
 )
 from database import get_existing_place_ids, get_existing_emails, upsert_leads, get_conn, init_db
-from ai_engine import build_search_queries
 from audit import audit_lead, get_currency_for_country
 from utils import COUNTRY_PHONE_CODES, _parse_query, _normalize_phone
 
@@ -768,12 +767,8 @@ class YelpSource(LeadSource):
             # We'd need additional calls or parsing
             pass
         
-        # If still empty, attempt to guess domain from business name
-        if not actual_website and name:
-            guessed = self._guess_website_from_business(name)
-            if guessed:
-                actual_website = guessed
-        
+        # A Yelp listing is not an authoritative website. Leave it unknown.
+
         # Get address
         location = business.get("location", {})
         address_parts = location.get("display_address", [])
@@ -957,11 +952,19 @@ class MultiSourceEngine:
             return []
         
         tasks = []
+        semaphore = asyncio.Semaphore(SCRAPE_THREADS)
+        async def bounded_audit(raw):
+            async with semaphore:
+                return await audit_lead(raw, session,
+                                        skip_competitor_filter=not exclude_competitors,
+                                        skip_if_clean=not include_clean_leads)
         for lead in leads:
             # Skip if already in DB (by source_id)
             if lead.source_id and lead.source_id in existing_ids:
                 continue
             
+            if lead.source_id:
+                existing_ids.add(lead.source_id)
             # Convert to auditor input format
             raw = lead.get_auditor_input()
             
@@ -969,9 +972,7 @@ class MultiSourceEngine:
             if lead.phone:
                 raw["_phone_normalized"] = lead.phone
             
-            tasks.append(audit_lead(raw, session,
-                                    skip_competitor_filter=not exclude_competitors,
-                                    skip_if_clean=not include_clean_leads))
+            tasks.append(bounded_audit(raw))
         
         if not tasks:
             return []
@@ -997,7 +998,8 @@ async def run_engine_web(country: str, target: int,
                         exclude_competitors: bool = False,
                         include_clean_leads: bool = False,
                         tech_stack_filters: Optional[List[str]] = None,
-                        source_selection: Optional[List[str]] = None):
+                        source_selection: Optional[List[str]] = None,
+                        state: str = ""):
     """
     Main lead generation pipeline with multi-source support.
 
@@ -1011,6 +1013,8 @@ async def run_engine_web(country: str, target: int,
     - tech_stack_filters: list of tech categories that must have gaps
     - source_selection: list of sources (serper_maps, google_places, serper_web, yelp)
     """
+    if type(target) is not int or not 1 <= target <= 100:
+        raise ValueError("target must be between 1 and 100")
     init_db()
 
     location_label = f"{city}, {country}" if city else country
@@ -1035,11 +1039,12 @@ async def run_engine_web(country: str, target: int,
                 f"List 15 high-ticket LOCAL service business niches in {country} that need marketing. "
                 "OUTPUT: JSON list of 15 strings ONLY."
             ) or ["Dentist","Roofer","Plumber","HVAC","Lawyer","Chiropractor","Med Spa","Pest Control","Auto Shop","Accountant"]
-        queries = [f"{n} in {city}" for n in niches]
+        queries = [f"{n} in {city}, {state}, United States" if state else f"{n} in {city}" for n in niches]
         import random as _random; _random.shuffle(queries)
         needed = math.ceil(target / AVG_LEADS_PER_QUERY * 1.5)
         queries = queries[:needed]
     else:
+        from ai_engine import build_search_queries
         queries = await loop.run_in_executor(None, build_search_queries, country, target)
         if not queries:
             await queue.put({"type": "error", "message": "Failed to generate queries. Check OpenRouter API key."})
@@ -1169,7 +1174,11 @@ async def run_engine_web(country: str, target: int,
             })
             
             # ── Fetch from multiple sources ──
-            source_leads = await engine.fetch_from_sources(session, query, country, 15)
+            source_leads = await engine.fetch_from_sources(session, query, country, min(15, target - total_saved))
+            source_leads = source_leads[:target - total_saved]
+            for candidate in source_leads:
+                candidate.niche = industry or candidate.niche
+                candidate.city = city or candidate.city
             total_scraped += len(source_leads)
             
             if not source_leads:
@@ -1187,6 +1196,8 @@ async def run_engine_web(country: str, target: int,
             
             # ── Process audited leads ──
             for lead in audited_leads:
+                if total_saved >= target:
+                    break
                 # Apply advanced filters
                 if not passes_filters(lead):
                     total_skipped += 1

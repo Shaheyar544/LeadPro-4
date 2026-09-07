@@ -63,3 +63,16 @@ def _normalize_phone(raw_phone: str, country: str = "") -> str:
         return code + digits
     else:
         return digits
+
+def csv_safe_cell(value):
+    """Neutralize spreadsheet formulas, including whitespace/control prefixes."""
+    if not isinstance(value, str):
+        return value
+    import unicodedata
+    index = 0
+    while index < len(value) and (value[index].isspace() or unicodedata.category(value[index]).startswith("C")):
+        index += 1
+    probe = value[index:]
+    if probe.startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
+        return "'" + value
+    return value

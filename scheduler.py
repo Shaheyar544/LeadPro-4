@@ -26,6 +26,9 @@ async def _drain_queue(q: asyncio.Queue):
 
 
 async def _run_auto_followups():
+    import config
+    if not config.OUTREACH_ENABLED:
+        return
     from outreach import run_followups_web
     q: asyncio.Queue = asyncio.Queue()
     drain = asyncio.create_task(_drain_queue(q))
@@ -43,6 +46,9 @@ async def _run_auto_followups():
 
 
 async def _run_auto_reply_scan():
+    import config
+    if not config.OUTREACH_ENABLED:
+        return
     from outreach import check_replies
     loop = asyncio.get_running_loop()
     try:
@@ -65,6 +71,9 @@ async def _run_daily_cleanup():
 
 
 async def _run_daily_warmup():
+    import config
+    if not config.OUTREACH_ENABLED:
+        return
     from config import WARMUP_ENABLED
     if not WARMUP_ENABLED:
         return
@@ -97,6 +106,10 @@ async def _run_fx_refresh():
 
 def start_scheduler():
     """Start the scheduler with configured jobs. Idempotent."""
+    import config
+    # Legacy scheduled work remains unavailable in the reduced product.
+    if not (config.SCHEDULER_ENABLED and config.OUTREACH_ENABLED):
+        return scheduler
     if scheduler.running:
         return scheduler
 

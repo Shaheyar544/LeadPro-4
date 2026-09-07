@@ -13,3 +13,12 @@ __pycache__/
 backup_old/
 _temp_check.js
 *.log
+
+# Local environments and test output
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+playwright-report/
+test-results/
+.jwt_secret-*

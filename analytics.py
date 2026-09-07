@@ -177,7 +177,8 @@ def export_csv(data: list[dict]) -> str:
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=list(data[0].keys()))
     writer.writeheader()
-    writer.writerows(data)
+    from utils import csv_safe_cell
+    writer.writerows({k: csv_safe_cell(row[k]) for k in row.keys()} for row in data)
     return output.getvalue()
 
 

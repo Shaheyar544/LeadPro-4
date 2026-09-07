@@ -819,11 +819,15 @@ async def _pagespeed_score(session, url):
     if not PAGESPEED_API_KEY:
         return -1
     try:
+        from url_safety import normalize_url, resolve_public
+        url = normalize_url(url)
+        parsed = urlparse(url)
+        await resolve_public(parsed.hostname, 443 if parsed.scheme == "https" else 80)
         params = {"url": url, "key": PAGESPEED_API_KEY,
                   "strategy": "mobile", "category": "performance"}
         async with session.get(
             "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
-            params=params,
+            params=params, allow_redirects=False,
             timeout=aiohttp.ClientTimeout(total=25),
         ) as resp:
             data = await resp.json()
@@ -836,43 +840,14 @@ async def _pagespeed_score(session, url):
 
 
 async def _fetch_website(session, url, timeout_sec=20):
-    """
-    Fetch website HTML with retry logic.
-    Try 1: Mobile UA, 20s timeout
-    Try 2: Desktop UA, 25s timeout (some sites block mobile bots)
-    Try 3: HTTP instead of HTTPS (some sites have broken SSL)
-    Returns (final_url, status_code, html, error_type)
-    """
-    attempts = [
-        (url, MOBILE_UA, timeout_sec),
-        (url, DESKTOP_UA, timeout_sec + 5),
-    ]
-    # If URL is HTTPS, also try HTTP as fallback
-    if url.startswith("https://"):
-        http_url = "http://" + url[8:]
-        attempts.append((http_url, DESKTOP_UA, timeout_sec))
+    """Compatibility wrapper; always use the centralized bounded fetch policy.
 
-    last_error = None
-    for attempt_url, ua, tout in attempts:
-        try:
-            headers = {"User-Agent": ua}
-            timeout = aiohttp.ClientTimeout(total=tout)
-            async with session.get(
-                attempt_url, headers=headers, timeout=timeout,
-                allow_redirects=True, ssl=VERIFY_SSL,
-            ) as resp:
-                final_url = str(resp.url)
-                status = resp.status
-                html = await resp.text(errors="replace")
-                return final_url, status, html, None
-        except asyncio.TimeoutError:
-            last_error = "timeout"
-        except aiohttp.ClientConnectorError:
-            last_error = "connection_refused"
-        except Exception as exc:
-            last_error = type(exc).__name__
-
-    return None, 0, "", last_error
+    The supplied provider session is deliberately never used for website traffic.
+    There are no insecure TLS or HTTP retry fallbacks.
+    """
+    from url_safety import safe_fetch_html
+    result = await safe_fetch_html(url)
+    return result.url, result.http_status, result.html, (None if result.status == "ok" else result.status)
 
 
 async def audit_lead(raw: dict, session: aiohttp.ClientSession,
@@ -920,50 +895,20 @@ async def audit_lead(raw: dict, session: aiohttp.ClientSession,
         pain_points.append("No Website")
     else:
         flags["has_website"] = True
-        url = _ensure_scheme(website_raw)
+        url = website_raw if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", website_raw) else "https://" + website_raw
         domain = _extract_domain(website_raw)
 
         final_url, status_code, html, error_type = await _fetch_website(
             session, url)
 
         if error_type:
-            # We couldn't reach the site
+            # Fetch failure is uncertainty, not evidence of a broken business site.
             site_was_timeout = True
-            if error_type == "timeout":
-                pain_points.append("Slow/Protected Website (Timeout)")
-            else:
-                pain_points.append(f"Site Unreachable ({error_type})")
-            # Don't mark as site_dead — it's probably Cloudflare/protection
-            # Try to guess emails from domain
-            if domain:
-                emails = _guess_emails_from_domain(domain)
-                # Try external APIs if still no emails
-                if not emails:
-                    hunter_emails = await _fetch_hunter_emails(session, domain)
-                    emails.extend(hunter_emails)
-                if not emails:
-                    clearbit_emails = await _fetch_clearbit_emails(session, domain)
-                    emails.extend(e for e in clearbit_emails if e not in emails)
-
-        elif status_code and status_code >= 400:
-            # Actually broken (4xx/5xx)
-            pain_points.append(f"Broken Website ({status_code})")
-            flags["site_dead"] = True
-            if domain:
-                emails = _guess_emails_from_domain(domain)
-
+            pain_points.append(f"Website check: {error_type}")
         elif html:
-            # Successfully fetched — full audit
             soup = BeautifulSoup(html, "html.parser")
             html_low = html.lower()
             emails = _extract_emails(html)
-            # Augment with external APIs
-            if domain:
-                hunter_emails = await _fetch_hunter_emails(session, domain)
-                emails.extend(e for e in hunter_emails if e not in emails)
-                if not emails:
-                    clearbit_emails = await _fetch_clearbit_emails(session, domain)
-                    emails.extend(e for e in clearbit_emails if e not in emails)
 
             flags["has_ssl"] = final_url.startswith("https://")
             if not flags["has_ssl"]:
@@ -1004,7 +949,7 @@ async def audit_lead(raw: dict, session: aiohttp.ClientSession,
                 tech_stack, content_signals, niche, rating, reviews)
 
             # ── Enrichment: Owner name ──
-            owner_info = extract_owner_from_html(html, soup)
+            # Personal owner inference is disabled in V0.1.
 
     # ── Rating & review pain points ──
     if 0 < rating < 4.0:
@@ -1014,7 +959,7 @@ async def audit_lead(raw: dict, session: aiohttp.ClientSession,
     elif reviews == 0:
         pain_points.append("No Reviews")
 
-    # ── Resolve best email: HTML > Maps > Domain guess ──
+    # ── Resolve best email: observed HTML or explicit provider business email only ──
     if maps_email and not emails:
         emails = [maps_email]
     elif maps_email:
@@ -1030,7 +975,8 @@ async def audit_lead(raw: dict, session: aiohttp.ClientSession,
             pain_points.append(f"Using Free Email ({domain})")
             flags["uses_free_email"] = True
 
-    ideal_service = _pick_ideal_service(pain_points, flags, site_was_timeout)
+    ideal_service = ("Website Review (Unverified)" if site_was_timeout
+                     else _pick_ideal_service(pain_points, flags, False))
 
     # ── Skip if no problems at all ──
     if skip_if_clean and not pain_points and not ops_pains:
