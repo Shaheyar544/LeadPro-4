@@ -12,3 +12,10 @@ def test_cookie_csrf():
 def test_health_shape():
  from health import liveness
  assert liveness()['status']=='ok'
+
+def test_redaction():
+ from log_redaction import redact
+ assert 'supersecret' not in redact('api_key=supersecret')
+def test_transient_result_not_durable():
+ from provider_transient import TransientDiscoveryResult
+ assert TransientDiscoveryResult('google_places_new','p',rating=5).durable_ref()=={'provider':'google_places_new','provider_record_id':'p'}
