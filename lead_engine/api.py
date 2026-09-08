@@ -26,8 +26,10 @@ from auth_sessions import fingerprint
 from health import liveness, readiness
 from redis_coordination import login_attempt, wake_worker
 from product_models import LeadGenRequest
+from local_modes import run_mode, visible_business
+from live_preflight import preflight
 
-COOKIE = '__Host-leadpro_session'
+COOKIE = '__Host-leadpro_offline_session' if run_mode() == 'offline_test' else '__Host-leadpro_session'
 log = logging.getLogger('leadpro.api')
 DUMMY_HASH = bcrypt.hashpw(secrets.token_bytes(32), bcrypt.gensalt()).decode()
 
@@ -111,7 +113,7 @@ def password_ok(value, stored):
 
 @app.get('/api/auth/mode')
 def auth_mode():
-    return {'mode': 'cookie', 'production': True}
+    return {'mode': 'cookie', 'production': True, 'run_mode': run_mode()}
 
 @app.post('/api/auth/login')
 def login(body: Login, request: Request, response: Response):
@@ -162,15 +164,16 @@ def change_password(body: ChangePassword, response: Response, auth=Depends(authe
 
 @app.post('/api/leadgen/start')
 def start(body: LeadGenRequest, auth=Depends(authenticated)):
-    if os.getenv('DISCOVERY_MODE', 'disabled') == 'disabled':
-        raise HTTPException(503, 'Discovery provider is not configured')
+    error = preflight()
+    if error:
+        raise HTTPException(503, error)
     with transaction() as db:
         db.scalar(select(User).where(User.id == auth[0].id).with_for_update())
         count = db.scalar(select(func.count()).select_from(SearchJob).where(
-            SearchJob.user_id == auth[0].id, SearchJob.status.in_(['queued', 'running'])))
+            SearchJob.user_id == auth[0].id, SearchJob.run_mode == run_mode(), SearchJob.status.in_(['queued', 'running'])))
         if count >= 10:
             raise HTTPException(429, 'Job queue capacity reached')
-        job = SearchJob(user_id=auth[0].id, payload=body.model_dump())
+        job = SearchJob(user_id=auth[0].id, run_mode=run_mode(), payload=body.model_dump())
         db.add(job)
         db.flush()
         event(db, 'job_create', auth[0].id, job.id)
@@ -179,14 +182,15 @@ def start(body: LeadGenRequest, auth=Depends(authenticated)):
 
 def owned_job(db, jid, owner):
     job = db.get(SearchJob, jid)
-    if job is None or job.user_id != owner:
+    if job is None or job.user_id != owner or job.run_mode != run_mode():
         raise HTTPException(404, 'Job not found')
     return job
 
 @app.get('/api/leadgen/jobs')
 def jobs(auth=Depends(authenticated)):
     with transaction() as db:
-        return [job_view(db, j) for j in db.scalars(select(SearchJob).where(SearchJob.user_id == auth[0].id).order_by(SearchJob.created_at.desc()).limit(50))]
+        return [job_view(db, j) for j in db.scalars(select(SearchJob).where(SearchJob.user_id == auth[0].id,
+            SearchJob.run_mode == run_mode()).order_by(SearchJob.created_at.desc()).limit(50))]
 
 @app.get('/api/leadgen/jobs/{jid}')
 def job_status(jid: str, auth=Depends(authenticated)):
@@ -197,7 +201,7 @@ def job_status(jid: str, auth=Depends(authenticated)):
 def cancel_job(jid: str, auth=Depends(authenticated)):
     with transaction() as db:
         job = db.scalar(select(SearchJob).where(SearchJob.id == jid).with_for_update())
-        if not job or job.user_id != auth[0].id:
+        if not job or job.user_id != auth[0].id or job.run_mode != run_mode():
             raise HTTPException(404, 'Job not found')
         if job.status in ('queued', 'running'):
             job.cancel_requested = True
@@ -227,7 +231,7 @@ def leads(limit: int = 50, offset: int = 0, auth=Depends(authenticated)):
 @app.get('/api/businesses/{bid}')
 def business_detail(bid: str, auth=Depends(authenticated)):
     with transaction() as db:
-        b = db.get(Business, bid)
+        b = db.scalar(select(Business).where(Business.id == bid, visible_business()))
         if not b or b.user_id != auth[0].id:
             raise HTTPException(404, 'Business not found')
         return detail_view(db, b, auth[0].id)
@@ -235,10 +239,11 @@ def business_detail(bid: str, auth=Depends(authenticated)):
 @app.get('/api/stats')
 def stats(auth=Depends(authenticated)):
     with transaction() as db:
-        businesses = list(db.scalars(select(Business).where(Business.user_id == auth[0].id)))
+        businesses = list(db.scalars(select(Business).where(Business.user_id == auth[0].id, visible_business())))
         emails = db.scalar(select(func.count(func.distinct(BusinessContact.business_id))).join(Business).where(
-            Business.user_id == auth[0].id, BusinessContact.kind == 'email'))
-        jobs = db.scalar(select(func.count()).select_from(SearchJob).where(SearchJob.user_id == auth[0].id, SearchJob.status.in_(['queued', 'running'])))
+            Business.user_id == auth[0].id, visible_business(), BusinessContact.kind == 'email'))
+        jobs = db.scalar(select(func.count()).select_from(SearchJob).where(SearchJob.user_id == auth[0].id,
+            SearchJob.run_mode == run_mode(), SearchJob.status.in_(['queued', 'running'])))
         return dict(total=len(businesses), with_email=emails, with_website=sum(bool(b.browser_observed_url) for b in businesses), active_jobs=jobs)
 
 @app.get('/api/config')

@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = ['docker', 'compose', '--env-file', str(ROOT / '.local-integration/stack.env'),
+BASE = ['docker', 'compose', '-p', 'leadpro-live', '--env-file', str(ROOT / '.local-integration/stack.env'),
         '-f', str(ROOT / 'compose.production.yaml'), 'exec', '-T', 'postgres']
 
 

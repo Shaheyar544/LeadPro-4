@@ -13,6 +13,13 @@ class OfflineGoogle(ProviderDiscovery):
     def __init__(self):
         super().__init__('google_places_new', 'OFFLINE_KEY_NOT_SENT')
 
+    async def fetch_page(self, *args, **kwargs):
+        page = await super().fetch_page(*args, **kwargs)
+        for row in page.records:
+            row['provider'] = 'fixture'
+            row['provider_record_id'] = row['provider_record_id'].replace('google_places_new:', 'fixture:', 1)
+        return page
+
     async def _json(self, http, method, url, **kwargs):
         return {'places': [dict(id='phase4a2-place-' + str(i),
             displayName={'text': SENTINELS[0]}, formattedAddress=SENTINELS[1],

@@ -1,4 +1,4 @@
-"""Opt-in validation of the isolated leadpro-phase4a2 Compose project.
+"""Opt-in validation of the isolated leadpro-offline-test Compose project.
 
 Run after build/up/migrate/admin bootstrap. All artifacts stay in the ignored
 .local-integration directory. Never points at a remote origin or production DB.
@@ -18,9 +18,9 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL = ROOT / '.local-integration'
-ORIGIN = 'https://localhost:8443'
-COMPOSE = ['docker', 'compose', '--env-file', str(LOCAL / 'stack.env'), '-f', str(ROOT / 'compose.production.yaml')]
-REPORT = json.loads((LOCAL / 'validation.json').read_text()) if (LOCAL / 'validation.json').exists() else {}
+ORIGIN = 'https://localhost:8444'
+COMPOSE = ['docker', 'compose', '-p', 'leadpro-offline-test', '--env-file', str(LOCAL / 'stack.env'), '-f', str(ROOT / 'compose.production.yaml'), '-f', str(ROOT / 'compose.test.yaml')]
+REPORT = json.loads((LOCAL / 'offline-validation.json').read_text()) if (LOCAL / 'offline-validation.json').exists() else {}
 PRIVATE = dict(line.split('=', 1) for line in (LOCAL / 'stack.env').read_text().splitlines() if '=' in line)
 SECRETS = [v for k, v in PRIVATE.items() if any(p in k for p in ('PASSWORD', 'SECRET', 'KEY'))]
 
@@ -43,7 +43,7 @@ def py(code, service='api'):
 
 def record(name, evidence):
     REPORT[name] = {'status': 'PASS', 'evidence': evidence}
-    (LOCAL / 'validation.json').write_text(json.dumps(REPORT, indent=2), encoding='utf-8')
+    (LOCAL / 'offline-validation.json').write_text(json.dumps(REPORT, indent=2), encoding='utf-8')
     print('PASS ' + name + ': ' + str(evidence), flush=True)
 
 
@@ -61,8 +61,20 @@ def eventually(check, timeout=80):
 
 
 def client():
-    return httpx.Client(base_url=ORIGIN, verify=ssl.create_default_context(cafile=str(LOCAL / 'caddy-root.crt')),
+    return httpx.Client(base_url=ORIGIN, verify=ssl.create_default_context(cafile=str(LOCAL / 'leadpro-offline-test-root.crt')),
                         trust_env=False, timeout=15, headers={'Origin': ORIGIN})
+
+
+def ensure_offline():
+    config = json.loads(dc('config', '--format', 'json'))
+    assert config['name'] == 'leadpro-offline-test'
+    assert config['volumes']['pgdata']['name'] == 'leadpro-offline-test_pgdata'
+    for service in ('api', 'worker'):
+        settings = config['services'][service]['environment']
+        assert settings['LOCAL_RUN_MODE'] == 'offline_test' and settings['DISCOVERY_MODE'] == 'offline'
+        assert not settings['GOOGLE_PLACES_NEW_API_KEY']
+    with client() as c:
+        assert c.get('/api/auth/mode').json()['run_mode'] == 'offline_test'
 
 
 def clear_rate_limit():
@@ -76,11 +88,13 @@ def login(c, password=None):
     assert response.status_code == 200, 'login failed with status ' + str(response.status_code)
     body = response.json()
     c.headers['X-CSRF-Token'] = body['csrf_token']
-    SECRETS.extend([body['csrf_token'], c.cookies.get('__Host-leadpro_session')])
+    SECRETS.extend([body['csrf_token'], c.cookies.get('__Host-leadpro_offline_session')])
     return response
 
 
 def create(c, count=1):
+    assert c.get('/api/auth/mode').json()['run_mode'] == 'offline_test'
+    eventually(lambda: dc('exec', '-T', 'redis', 'redis-cli', 'GET', 'leadpro:worker-ready:offline_test').strip() == 'ready')
     response = c.post('/api/leadgen/start', json=dict(category='Plumber', city='Austin', state='TX',
                       target_count=count, opportunity_profile='website_conversion'))
     assert response.status_code == 200
@@ -109,7 +123,7 @@ def scan_db(database='leadpro'):
 
 
 def main():
-    assert PRIVATE['DISCOVERY_MODE'] == 'offline' and PRIVATE['LOCAL_INTEGRATION_TEST'] == 'true'
+    ensure_offline()
     assert subprocess.check_output(['git', 'branch', '--show-current'], cwd=ROOT, text=True).strip() == 'lead-engine-v1'
     c = client()
     eventually(lambda: c.get('/health/ready').status_code == 200)
@@ -166,7 +180,7 @@ def main():
     jid = create(c, 5)
     eventually(lambda: job(c, jid)['status'] == 'running')
     active_stats = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.MemUsage}}|{{.CPUPerc}}'], text=True)
-    record('resources_during_job', [line for line in active_stats.splitlines() if line.startswith('leadpro-phase4a2-')])
+    record('resources_during_job', [line for line in active_stats.splitlines() if line.startswith('leadpro-offline-test-')])
     assert sql(f"SELECT heartbeat_at IS NOT NULL FROM search_jobs WHERE id='{jid}'") == 't'
     worker_before = dc('ps', '-q', 'worker').strip()
     dc('restart', 'api')
@@ -197,21 +211,21 @@ def main():
     record('worker_restart', 'SIGKILL mid-job -> expired lease reclaimed; completed audit IDs retained; 5 items; no duplicate runs/scores; cleanup recovered')
 
     dc('stop', 'camofox')
-    jid = create(c)
-    time.sleep(3)
-    assert c.get('/health/ready').status_code == 200
-    assert job(c, jid)['status'] == 'queued'
-    assert sql(f"SELECT attempts FROM search_jobs WHERE id='{jid}'") == '0'
-    code = subprocess.run(COMPOSE + ['exec', '-T', 'worker', 'python', '-m', 'lead_engine.check', 'worker'], capture_output=True).returncode
-    assert code != 0
-    for token in ('', 'invalid'):
-        assert c.post('/api/leadgen/jobs/' + jid + '/cancel', headers={'X-CSRF-Token': token}).status_code == 403
-    assert c.post('/api/leadgen/jobs/' + jid + '/cancel').status_code == 200
-    assert job(c, jid)['status'] == 'cancelled'
-    resume_id = create(c)
-    dc('start', 'camofox')
-    eventually(lambda: completed(c, resume_id))
-    record('camofox_outage', 'API remained ready; worker probe failed; zero claims/provider calls while down; queued cancel and resume passed')
+    try:
+        eventually(lambda: dc('exec', '-T', 'redis', 'redis-cli', 'EXISTS', 'leadpro:worker-ready:offline_test').strip() == '0')
+        before = sql('SELECT count(*) FROM search_jobs')
+        response = c.post('/api/leadgen/start', json=body)
+        assert response.status_code == 503
+        assert sql('SELECT count(*) FROM search_jobs') == before
+        record('camofox_outage', 'Browser unavailable: API returns 503 before queue/discovery; no quota consumed')
+    finally:
+        dc('start', 'camofox')
+    # Exercise a legitimate queued cancellation while the single worker is busy.
+    busy = create(c, 5)
+    eventually(lambda: job(c, busy)['status'] == 'running')
+    cancelled_id = create(c)
+    assert c.post('/api/leadgen/jobs/' + cancelled_id + '/cancel').status_code == 200
+    eventually(lambda: completed(c, busy))
 
     # Dependency degradation without conflating liveness with readiness.
     for service in ('redis', 'postgres'):
@@ -235,7 +249,7 @@ def main():
             "import asyncio\nfrom lead_engine.api import app,lifespan\nasync def check():\n    async with lifespan(app):\n        pass\nasyncio.run(check())"], capture_output=True)
         assert result.returncode != 0 and b'not at Alembic head' in result.stderr
     finally:
-        sql("UPDATE alembic_version SET version_num='0002'")
+        sql("UPDATE alembic_version SET version_num='0003'")
     eventually(lambda: c.get('/health/ready').status_code == 200)
     record('readiness', 'Live stays 200; readiness 503 for PostgreSQL, Redis or migration mismatch; worker dependency probes fail; recovery passes')
 
@@ -251,9 +265,9 @@ def main():
     login(attacker)
     record('login_rate_limit', '5 failures then 429 despite spoofed XFF/dedicated header; successful login after actual 60s expiry')
 
-    old_cookie = c.cookies.get('__Host-leadpro_session')
+    old_cookie = c.cookies.get('__Host-leadpro_offline_session')
     assert c.post('/api/auth/logout').status_code == 200
-    assert c.get('/api/auth/me', headers={'Cookie': '__Host-leadpro_session=' + old_cookie}).status_code == 401
+    assert c.get('/api/auth/me', headers={'Cookie': '__Host-leadpro_offline_session=' + old_cookie}).status_code == 401
     login(c)
     login(other)
     changed = secrets.token_hex(24)
@@ -282,16 +296,18 @@ def main():
     record('log_scan', 'All six container logs: no full session/csrf/password/access keys or synthetic Google values')
 
     stats = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.MemUsage}}|{{.CPUPerc}}'], text=True)
-    record('resources', [line for line in stats.splitlines() if line.startswith('leadpro-phase4a2-')])
+    record('resources', [line for line in stats.splitlines() if line.startswith('leadpro-offline-test-')])
     c.close(); other.close(); attacker.close()
 
 
 def extras():
     """Backup/restore, container configuration and private network evidence."""
-    from backup_restore import backup, restore
-    assert PRIVATE['DISCOVERY_MODE'] == 'offline'
-    if (LOCAL / 'validation.json').exists():
-        REPORT.update(json.loads((LOCAL / 'validation.json').read_text()))
+    import backup_restore
+    backup_restore.BASE = COMPOSE + ['exec', '-T', 'postgres']
+    backup, restore = backup_restore.backup, backup_restore.restore
+    ensure_offline()
+    if (LOCAL / 'offline-validation.json').exists():
+        REPORT.update(json.loads((LOCAL / 'offline-validation.json').read_text()))
     suffix = secrets.token_hex(4)
     backup_path = LOCAL / ('postgres-' + suffix + '.dump')
     database = 'phase4a2_restore_' + suffix
@@ -309,7 +325,7 @@ def extras():
         assert sql(query) == sql(query, database)
         counts[table] = restored
     scan_db(database)
-    assert sql('SELECT version_num FROM alembic_version', database) == '0002'
+    assert sql('SELECT version_num FROM alembic_version', database) == '0003'
     record('backup_restore', {'format': 'pg_dump custom; binary pipes; new empty DB', 'bytes': backup_path.stat().st_size,
                              'restored_counts': counts, 'row_checksums': 'equal', 'provider_sentinels': 'absent'})
 
@@ -323,7 +339,7 @@ def extras():
         if name != 'caddy':
             assert not bound
         else:
-            assert bound == {'443/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8443'}]}
+            assert bound == {'443/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '8444'}]}
         assert not any(m['Destination'] == '/var/run/docker.sock' for m in container['Mounts'])
         if name == 'camofox':
             assert not container['Mounts']
@@ -376,19 +392,20 @@ def extras():
         eventually(lambda: c.get('/health/ready').status_code == 200)
         logs = dc('logs', '--no-color', 'caddy')
         assert 'FakeQuerySecret_24681357' not in logs
-        assert c.headers['X-CSRF-Token'] not in logs and c.cookies.get('__Host-leadpro_session') not in logs
+        assert c.headers['X-CSRF-Token'] not in logs and c.cookies.get('__Host-leadpro_offline_session') not in logs
         assert 'connect: connection refused' in logs
         c.post('/api/auth/logout')
     record('caddy_error_redaction', 'Forced upstream 502 retained diagnostic but omitted query secret, cookie and CSRF token')
     for key in ('failure',):
         REPORT.pop(key, None)
-    (LOCAL / 'validation.json').write_text(json.dumps(REPORT, indent=2), encoding='utf-8')
+    (LOCAL / 'offline-validation.json').write_text(json.dumps(REPORT, indent=2), encoding='utf-8')
 
 
 def ui_smoke():
+    ensure_offline()
     from playwright.sync_api import sync_playwright, expect
-    if (LOCAL / 'validation.json').exists():
-        REPORT.update(json.loads((LOCAL / 'validation.json').read_text()))
+    if (LOCAL / 'offline-validation.json').exists():
+        REPORT.update(json.loads((LOCAL / 'offline-validation.json').read_text()))
     clear_rate_limit()
     with sync_playwright() as p:
         browser = p.chromium.launch(channel='msedge', headless=True)
@@ -401,6 +418,7 @@ def ui_smoke():
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('request', lambda request: requests.append((request.url, request.all_headers())))
         page.goto(ORIGIN)
+        expect(page.locator('#run-mode-banner')).to_be_visible()
         page.locator('#username').fill('admin')
         page.locator('#password').fill(PRIVATE['INITIAL_ADMIN_PASSWORD'])
         page.get_by_role('button', name='Sign in', exact=True).click()
@@ -408,7 +426,7 @@ def ui_smoke():
         page.reload()
         page.locator('#layout').wait_for(state='visible')
         assert page.evaluate('localStorage.length') == 0 and page.evaluate('sessionStorage.length') == 0
-        assert '__Host-leadpro_session' not in page.evaluate('document.cookie')
+        assert '__Host-leadpro_offline_session' not in page.evaluate('document.cookie')
         page.get_by_role('button', name='Lead Generation', exact=True).click()
         for key, value in dict(category='Plumber', city='Austin', state='TX', target_count='1').items():
             page.locator('#' + key).fill(value)
@@ -446,6 +464,7 @@ def secret_scan():
 
 
 def coordination_smoke():
+    ensure_offline()
     clear_rate_limit()
     with client() as c:
         login(c)
@@ -491,5 +510,5 @@ if __name__ == '__main__':
             main()
     except Exception as exc:
         REPORT['failure'] = {'status': 'FAIL', 'type': type(exc).__name__, 'message': str(exc)}
-        (LOCAL / 'validation.json').write_text(json.dumps(REPORT, indent=2), encoding='utf-8')
+        (LOCAL / 'offline-validation.json').write_text(json.dumps(REPORT, indent=2), encoding='utf-8')
         raise

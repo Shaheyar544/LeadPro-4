@@ -389,6 +389,7 @@ async function initializeAuthentication() {
   const response = await fetch('/api/auth/mode', {credentials: 'same-origin'});
   if (!response.ok) throw new Error('Authentication configuration unavailable.');
   const mode = await response.json();
+  $('run-mode-banner').hidden = mode.run_mode !== 'offline_test';
   authMode = mode.production === false && mode.mode === 'legacy-development' ? 'legacy-development' : 'cookie';
   if (authMode === 'cookie') {
     try { await enterWorkspace(); }

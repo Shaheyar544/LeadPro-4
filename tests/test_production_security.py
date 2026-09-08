@@ -12,7 +12,8 @@ def safe_env(monkeypatch):
         OUTREACH_ENABLED='false', CORS_ALLOW_WILDCARD='false', RELOAD='false',
         APP_ORIGIN='https://localhost:8443', CAMOFOX_BASE_URL='http://camofox:9377',
         CAMOFOX_INTERACTIVE='off', CAMOFOX_CRASH_REPORT_ENABLED='false', ENABLE_VNC='false',
-        CAMOFOX_PERSISTENCE_ENABLED='false', DISCOVERY_MODE='disabled')
+        CAMOFOX_PERSISTENCE_ENABLED='false', DISCOVERY_MODE='google_places_new', LOCAL_RUN_MODE='live', LOCAL_INTEGRATION_TEST='false',
+        GOOGLE_PLACES_API_VERSION='new', GOOGLE_PLACES_NEW_API_KEY='unit-test-not-sent')
     for key, value in values.items():
         monkeypatch.setenv(key, value)
 

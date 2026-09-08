@@ -1,14 +1,9 @@
-# Shared, inspected Phase 4A.2 configuration. No alternative Compose project.
+# Shared launch logic for two explicitly isolated modes.
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $script:RepoRoot = Split-Path -Parent $PSScriptRoot
-$script:ComposeFile = Join-Path $script:RepoRoot 'compose.production.yaml'
-$script:EnvironmentFile = Join-Path $script:RepoRoot '.local-integration\stack.env'
-$script:CertificateFile = Join-Path $script:RepoRoot '.local-integration\caddy-root.crt'
 $script:Services = @('caddy', 'api', 'worker', 'postgres', 'redis', 'camofox')
-$script:ComposeArgs = @('compose', '--project-name', 'leadpro-phase4a2', '--env-file',
-    $script:EnvironmentFile, '-f', $script:ComposeFile)
 $script:SecretValues = New-Object 'System.Collections.Generic.List[string]'
 $script:Docker = $null
 
@@ -31,13 +26,34 @@ function Protect-Output([string]$Text) {
 }
 
 function Initialize-LocalStack {
+    param([Parameter(Mandatory=$true)][ValidateSet('Live', 'OfflineTest')][string]$Mode)
+    $script:Mode = $Mode
+    $offline = $Mode -eq 'OfflineTest'
+    $script:Project = if ($offline) { 'leadpro-offline-test' } else { 'leadpro-live' }
+    $script:ExpectedMode = if ($offline) { 'offline_test' } else { 'live' }
+    $script:DashboardUrl = if ($offline) { 'https://localhost:8444' } else { 'https://localhost:8443' }
+    $script:Title = if ($offline) { 'OFFLINE TEST MODE' } else { 'LIVE LOCAL MODE' }
+    $script:ComposeFiles = @((Join-Path $script:RepoRoot 'compose.production.yaml'))
+    if ($offline) { $script:ComposeFiles += Join-Path $script:RepoRoot 'compose.test.yaml' }
+    $script:EnvironmentFile = Join-Path $script:RepoRoot '.local-integration\stack.env'
+    $script:EnvironmentFiles = @()
+    $rootEnv = Join-Path $script:RepoRoot '.env'
+    if (Test-Path -LiteralPath $rootEnv -PathType Leaf) { $script:EnvironmentFiles += $rootEnv }
+    # Existing production secrets take precedence over the development .env.
+    $script:EnvironmentFiles += $script:EnvironmentFile
+    $script:CertificateFile = Join-Path $script:RepoRoot ('.local-integration\' + $script:Project + '-root.crt')
+    $script:ComposeArgs = @('compose', '--project-name', $script:Project)
+    foreach ($file in $script:EnvironmentFiles) { $script:ComposeArgs += @('--env-file', $file) }
+    foreach ($file in $script:ComposeFiles) { $script:ComposeArgs += @('-f', $file) }
     Set-Location -LiteralPath $script:RepoRoot
     # Collect values privately before any native diagnostics can be displayed.
     Get-ChildItem Env: | ForEach-Object { Add-PrivateValue $_.Name $_.Value }
-    if (Test-Path -LiteralPath $script:EnvironmentFile -PathType Leaf) {
-        foreach ($line in [IO.File]::ReadAllLines($script:EnvironmentFile)) {
-            if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
-                Add-PrivateValue $Matches[1] $Matches[2].Trim().Trim('"', "'")
+    foreach ($envFile in $script:EnvironmentFiles) {
+        if (Test-Path -LiteralPath $envFile -PathType Leaf) {
+            foreach ($line in [IO.File]::ReadAllLines($envFile)) {
+                if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+                    Add-PrivateValue $Matches[1] $Matches[2].Trim().Trim('"', "'")
+                }
             }
         }
     }
@@ -100,7 +116,8 @@ function Test-LocalDocker {
 }
 
 function Read-LocalConfiguration {
-    foreach ($file in @($script:ComposeFile, $script:EnvironmentFile)) {
+    param([switch]$RequireLiveConfiguration)
+    foreach ($file in ($script:ComposeFiles + @($script:EnvironmentFile))) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
             throw "Required configuration file is missing: $file`nSee docs/DEPLOYMENT_DOCKER.md for the existing local setup."
         }
@@ -120,11 +137,35 @@ function Read-LocalConfiguration {
     if (@(Compare-Object $script:Services @($config.services.PSObject.Properties.Name)).Count -ne 0) {
         throw 'Compose services differ from the validated six-service local stack.'
     }
-    $script:DashboardUrl = [string]$config.services.api.environment.APP_ORIGIN
-    if ($script:DashboardUrl -ne 'https://localhost:8443') {
-        throw 'The Compose origin differs from the validated local Caddy HTTPS address.'
+    if ([string]$config.services.api.environment.APP_ORIGIN -ne $script:DashboardUrl -or $config.name -ne $script:Project) {
+        throw 'Compose origin or project does not match the selected local mode.'
     }
-    Write-Host 'Using compose.production.yaml with .local-integration\stack.env (values hidden).'
+    foreach ($service in @('api', 'worker')) {
+        $settings = $config.services.$service.environment
+        $expectedDiscovery = if ($script:Mode -eq 'Live') { 'google_places_new' } else { 'offline' }
+        if ($settings.LOCAL_RUN_MODE -ne $script:ExpectedMode -or $settings.DISCOVERY_MODE -ne $expectedDiscovery) {
+            throw 'Compose provider does not match the selected local mode.'
+        }
+        if ($RequireLiveConfiguration -and $script:Mode -eq 'Live' -and -not $settings.GOOGLE_PLACES_NEW_API_KEY) {
+            throw 'Google Places API (New) is not configured. Set the existing .env discovery key; no fixture fallback is available.'
+        }
+        if ($script:Mode -eq 'OfflineTest' -and $settings.GOOGLE_PLACES_NEW_API_KEY) {
+            throw 'Offline containers must not receive paid discovery credentials.'
+        }
+    }
+    $expectedVolume = if ($script:Mode -eq 'Live') { 'leadpro-phase4a2_pgdata' } else { 'leadpro-offline-test_pgdata' }
+    if ($config.volumes.pgdata.name -ne $expectedVolume) { throw 'PostgreSQL volume does not match the selected mode.' }
+    $script:ResolvedVolumes = $config.volumes
+    Write-Host ('Mode: ' + $script:Title + ' | Project: ' + $script:Project)
+    Write-Host ('Compose: ' + (($script:ComposeFiles | ForEach-Object { Split-Path -Leaf $_ }) -join ' + '))
+    Write-Host ('PostgreSQL volume: ' + $expectedVolume)
+    if ($RequireLiveConfiguration) {
+        if ($script:Mode -eq 'Live') { Write-Host 'Google Places New: configured (authorization verified by the first search request)' }
+        Write-Host 'PostgreSQL: configured'
+        Write-Host 'Redis: configured'
+        Write-Host 'CamoFox: configured'
+        Write-Host 'Session secret: configured'
+    }
 }
 
 function Get-LocalStates {

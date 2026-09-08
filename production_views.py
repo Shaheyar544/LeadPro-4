@@ -4,19 +4,29 @@ import io
 import json
 from sqlalchemy import select, func
 from production_models import *
+from local_modes import run_mode, visible_business, LIVE_ERROR
 
 def job_view(db, job):
-    items = list(db.scalars(select(SearchJobItem).where(SearchJobItem.job_id == job.id)))
+    items = list(db.scalars(select(SearchJobItem).join(Business).where(
+        SearchJobItem.job_id == job.id, visible_business(job.run_mode))))
     done = sum(i.status == 'completed' for i in items)
-    return dict(id=job.id, **job.payload, status=job.status, cancel_requested=job.cancel_requested,
+    return dict(id=job.id, **job.payload, run_mode=job.run_mode, status=job.status, cancel_requested=job.cancel_requested,
                 discovered_count=len(items), processed_count=done, qualified_count=done,
-                error_message=job.error_code, created_at=job.created_at.isoformat())
+                error_message=LIVE_ERROR if job.error_code == 'live_discovery_unavailable' else job.error_code,
+                created_at=job.created_at.isoformat())
 
-def detail_view(db, business, owner):
-    item = db.scalar(select(SearchJobItem).join(SearchJob).where(
-        SearchJobItem.business_id == business.id, SearchJob.user_id == owner).order_by(SearchJob.created_at.desc()).limit(1))
+def detail_view(db, business, owner, job_id=None):
+    query = select(SearchJobItem).join(SearchJob).where(
+        SearchJobItem.business_id == business.id, SearchJob.user_id == owner, SearchJob.run_mode == run_mode())
+    if job_id:
+        query = query.where(SearchJob.id == job_id)
+    item = db.scalar(query.order_by(SearchJob.created_at.desc()).limit(1))
     context = db.get(SearchJob, item.job_id).payload if item else {}
-    runs = list(db.scalars(select(AuditRun).where(AuditRun.business_id == business.id).order_by(AuditRun.created_at.desc())))
+    audit_query = select(AuditRun).join(SearchJobItem).join(SearchJob).where(
+        AuditRun.business_id == business.id, SearchJob.user_id == owner, SearchJob.run_mode == run_mode())
+    if job_id:
+        audit_query = audit_query.where(SearchJob.id == job_id)
+    runs = list(db.scalars(audit_query.order_by(AuditRun.created_at.desc())))
     run = runs[0] if runs else None
     score = db.scalar(select(LeadScore).where(LeadScore.audit_id == run.id)) if run else None
     return dict(
@@ -34,13 +44,14 @@ def detail_view(db, business, owner):
         history=[dict(id=r.id, status=r.status) for r in runs])
 
 def leads_view(db, owner, limit=50, offset=0, job_id=None):
-    query = select(Business).where(Business.user_id == owner)
+    query = select(Business).where(Business.user_id == owner, visible_business())
     if job_id:
-        query = query.join(SearchJobItem).where(SearchJobItem.job_id == job_id)
+        query = query.join(SearchJobItem).join(SearchJob).where(
+            SearchJobItem.job_id == job_id, SearchJob.user_id == owner, SearchJob.run_mode == run_mode())
     total = db.scalar(select(func.count()).select_from(query.subquery()))
     leads = []
     for business in db.scalars(query.order_by(Business.created_at.desc()).offset(offset).limit(limit)):
-        detail = detail_view(db, business, owner)
+        detail = detail_view(db, business, owner, job_id=job_id)
         b, score = detail['business'], detail['score'] or {}
         leads.append(dict(id=b['id'], business_name=b['canonical_name'], city=b['city'], state=b['state'],
                           website=b['website_url'], opportunity_score=score.get('opportunity_score'),
@@ -60,7 +71,7 @@ def export_csv(db, owner):
     writer = csv.writer(output)
     writer.writerow(['business_name', 'website', 'phone', 'email', 'evidence', 'opportunity_v2',
                      'confidence', 'provider_identifier', 'search_category', 'search_city', 'search_state'])
-    for b in db.scalars(select(Business).where(Business.user_id == owner).order_by(Business.created_at)):
+    for b in db.scalars(select(Business).where(Business.user_id == owner, visible_business()).order_by(Business.created_at)):
         detail = detail_view(db, b, owner)
         context, score = detail['business'], detail['score'] or {}
         row = [b.browser_observed_name, b.browser_observed_url,

@@ -1,4 +1,4 @@
-name: leadpro-phase4a2
+name: leadpro-live
 x-app-env: &app-env
   APP_ENV: production
   DATABASE_URL: postgresql+psycopg://leadpro:${POSTGRES_PASSWORD:?local password required}@postgres:5432/leadpro
@@ -14,15 +14,18 @@ x-app-env: &app-env
   OUTREACH_ENABLED: "false"
   CORS_ALLOW_WILDCARD: "false"
   CAMOFOX_BASE_URL: http://camofox:9377
+  BROWSER_PROVIDER: camofox
   CAMOFOX_ACCESS_KEY: ${CAMOFOX_ACCESS_KEY:?browser access key required}
   CAMOFOX_INTERACTIVE: "off"
   CAMOFOX_CRASH_REPORT_ENABLED: "false"
   ENABLE_VNC: "false"
   CAMOFOX_PERSISTENCE_ENABLED: "false"
-  DISCOVERY_MODE: ${DISCOVERY_MODE:-disabled}
-  LOCAL_INTEGRATION_TEST: ${LOCAL_INTEGRATION_TEST:-false}
-  OFFLINE_ITEM_DELAY: ${OFFLINE_ITEM_DELAY:-0}
-  GOOGLE_PLACES_NEW_API_KEY: ${GOOGLE_PLACES_NEW_API_KEY:-}
+  LOCAL_RUN_MODE: live
+  DISCOVERY_MODE: google_places_new
+  GOOGLE_PLACES_API_VERSION: new
+  LOCAL_INTEGRATION_TEST: "false"
+  OFFLINE_ITEM_DELAY: "0"
+  GOOGLE_PLACES_NEW_API_KEY: ${GOOGLE_PLACES_NEW_API_KEY:-${GOOGLE_PLACES_API_KEY:-}}
 services:
   caddy:
     image: caddy:2.8-alpine
@@ -130,6 +133,13 @@ networks:
   data: {internal: true}
   browser: {}
 volumes:
-  pgdata: {}
-  caddy_data: {}
-  caddy_config: {}
+  # Adopt the validated existing database, including accounts; never recreate it.
+  pgdata:
+    name: leadpro-phase4a2_pgdata
+    external: true
+  caddy_data:
+    name: leadpro-phase4a2_caddy_data
+    external: true
+  caddy_config:
+    name: leadpro-phase4a2_caddy_config
+    external: true

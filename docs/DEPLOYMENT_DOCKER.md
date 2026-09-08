@@ -15,39 +15,41 @@ Run `docker --version`, `docker compose version`, `docker info` first.
 If Docker is unavailable, stop and start/install Docker Desktop normally.
 Do not use Windows containers.
 
-## Local configuration
+## Local configuration and launch modes
 
-Generate four independent random values (at least 32 random bytes encoded as
-hex is suitable) for POSTGRES_PASSWORD, SESSION_SECRET, INITIAL_ADMIN_PASSWORD
-and CAMOFOX_ACCESS_KEY. Put them in the ignored `.local-integration/stack.env`.
-Never print or commit that file. Add the following nonsecret local settings:
+Keep the existing private `.local-integration/stack.env` with POSTGRES_PASSWORD,
+SESSION_SECRET, INITIAL_ADMIN_PASSWORD and CAMOFOX_ACCESS_KEY. For a new setup,
+generate four independent random values (32 random bytes encoded as hex works).
+Never print or commit them. Keep the Google key in the existing ignored `.env`:
+`GOOGLE_PLACES_NEW_API_KEY` is preferred, with `GOOGLE_PLACES_API_KEY` accepted
+for compatibility at the New endpoint only. The launchers load `.env` first,
+then the production secret file. There is no default account password.
 
-```dotenv
-DISCOVERY_MODE=offline
-LOCAL_INTEGRATION_TEST=true
-OFFLINE_ITEM_DELAY=2
-```
+| Mode | Compose files | Project | PostgreSQL volume | URL |
+| --- | --- | --- | --- | --- |
+| LIVE | compose.production.yaml | leadpro-live | leadpro-phase4a2_pgdata (existing external volume) | https://localhost:8443 |
+| OFFLINE TEST | compose.production.yaml + compose.test.yaml | leadpro-offline-test | leadpro-offline-test_pgdata | https://localhost:8444 |
 
-The offline Google response and independent browser facts are built-in,
-deterministic fixtures. Request bodies cannot select or override fixture URLs.
-Leave the live Google key unset. The regular default is discovery disabled.
+Compose fixes LOCAL_RUN_MODE and discovery settings. LIVE uses Google New and
+real CamoFox; OFFLINE TEST uses explicitly tagged fixtures and receives no Google
+key. Existing offline flags in stack.env cannot change the LIVE launcher.
+The live project adopts the existing PostgreSQL and Caddy volumes without
+copying or deleting data. On a new machine, the launcher creates these named
+volumes. Offline uses distinct database/CA volumes and session-cookie names.
 
 ## Startup
 
-Run from the repository root (PowerShell or a POSIX shell):
+Start Docker Desktop, then `START_LOCAL.bat` for LIVE or
+`START_OFFLINE_TEST.bat` for fixtures. They build the existing production image,
+start PostgreSQL/Redis, run Alembic, bootstrap an absent admin, start all six
+services, verify health and the Caddy CA, then open the default browser.
+PowerShell 7 is preferred with Windows PowerShell 5.1 fallback. Compose 2.24.4+
+is required for the offline port override; tested with v5.5.0.
 
-```text
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml build
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml up -d postgres redis
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml run --rm --no-deps api alembic upgrade head
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml run --rm --no-deps api alembic check
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml run --rm --no-deps api python -m lead_engine.admin
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml up -d --wait
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml ps
-```
-
-The explicit administrator bootstrap creates `admin` only if absent. It does
-not reset an existing password. API startup never creates tables or runs migrations.
+The administrator bootstrap never resets an existing password. Use Settings
+> Change password with the current password. API startup never creates tables
+or runs migrations itself; the launcher runs the explicit maintenance command.
+`STATUS_LOCAL.bat` shows the exact live project, files, volume and services.
 
 Only `https://localhost:8443` is published, bound to 127.0.0.1. Caddy uses its
 internal CA; no public certificate is requested. PostgreSQL 5432, Redis 6379,
@@ -58,16 +60,20 @@ the non-root node account, no profile volume, disabled plugins/telemetry/VNC,
 and explicitly forced headless Firefox. Its official image still starts Xvfb;
 the Firefox process itself has `-headless`.
 
-Export the local CA for the strict HTTPS integration client:
+The launcher exports only the public local CA into the ignored integration
+directory. To run the restart fixture regression harness, start
+**OFFLINE TEST only**, then:
 
 ```text
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml cp caddy:/data/caddy/pki/authorities/local/root.crt .local-integration/caddy-root.crt
 python scripts/validate_local_stack.py
 python scripts/validate_local_stack.py --ui
 python scripts/validate_local_stack.py --extras
 python scripts/validate_local_stack.py --coordination
 python scripts/validate_local_stack.py --secret-scan
 ```
+
+The harness is pinned to the offline project/port and checks mode before
+submitting jobs. Do not redirect it at LIVE. Reports use offline-validation.json.
 
 Use the repository virtualenv on Windows. The UI smoke requires installed Edge
 and Playwright, runs headless, and trusts the local certificate only within its
@@ -86,23 +92,35 @@ files with the pinned Gitleaks image; pull that image first if it is not cached.
 
 ```text
 docker build --target test -t leadpro-phase4a2:test .
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml exec -T postgres createdb -U leadpro phase4a2_tests
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml -f compose.test.yaml run --rm integration alembic upgrade head
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml -f compose.test.yaml run --rm integration
+docker compose -p leadpro-offline-test --env-file .local-integration/stack.env -f compose.production.yaml -f compose.test.yaml exec -T postgres createdb -U leadpro phase4a2_tests
+docker compose -p leadpro-offline-test --env-file .local-integration/stack.env -f compose.production.yaml -f compose.test.yaml run --rm integration alembic upgrade head
+docker compose -p leadpro-offline-test --env-file .local-integration/stack.env -f compose.production.yaml -f compose.test.yaml run --rm integration
 ```
 
 The database creation intentionally fails if the name already exists; reuse
 only this known test database or choose another explicitly empty test DB.
 The normal image excludes test dependencies; the named test target adds them.
 
-## Shutdown
+## Maintenance and shutdown
+
+`CLEAN_FIXTURE_DATA.bat` targets LIVE. It runs a dry run with counts only, then
+requires exact `DELETE FIXTURES` confirmation. The transaction rechecks the
+reviewed plan under short database locks and refuses active jobs/pending browser
+cleanup or changed records. Mixed/unclassified history and all account/security
+records are preserved. Use `-DryRun` to inspect without a prompt.
+
+Before applying schema/data maintenance, make a private backup:
 
 ```text
-docker compose --env-file .local-integration/stack.env -f compose.production.yaml down
+python scripts/backup_restore.py backup .local-integration/before-maintenance.dump
+python scripts/backup_restore.py restore .local-integration/before-maintenance.dump --database phase4a2_restore_review
 ```
 
-This stops/removes the task's containers/networks and retains named database/CA
-volumes. Do not use `down -v` unless deliberately deleting this test data.
-Backups, logs, screenshots, runtime configuration and instruction files stay out
-of Git and the production build context. See the integration report for results
-and security limitations before any later deployment work.
+Restore always creates a new database and refuses to overwrite an existing one.
+These commands explicitly target the live Compose project. Restore verification
+in the offline harness explicitly targets the offline project instead.
+
+`STOP_LOCAL.bat` stops LIVE; `STOP_OFFLINE_TEST.bat` stops OFFLINE TEST. Both
+preserve every named volume. Never use volume deletion or pruning as fixture
+cleanup. Logs, credentials, dumps, profiles, screenshots and instruction files
+remain ignored/untracked. No public deployment or other phase is included.

@@ -15,7 +15,9 @@ from production_config import validate_production_config
 from production_logging import configure_logging
 from production_repository import ProductionRepository, LeaseLost
 from redis_coordination import CoordinationLease, redis_ready, wait_for_work
-from discovery import ProviderDiscovery
+from discovery import ProviderDiscovery, DiscoveryError
+from local_modes import run_mode, validate_mode, validate_reference, fixture_url
+from live_preflight import publish_ready
 
 log = logging.getLogger('leadpro.worker')
 
@@ -68,7 +70,8 @@ async def process_job(repo, job, real_browser, leases, guard):
     cancelled = lambda: lost.is_set() or repo.cancelled(job.id, token)
     browser = real_browser
     try:
-        offline = os.getenv('DISCOVERY_MODE') == 'offline'
+        validate_mode()
+        offline = run_mode() == 'offline_test'
         if offline:
             from .offline import OfflineGoogle, browser_fixture, validate_fixture
             source = OfflineGoogle()
@@ -84,7 +87,8 @@ async def process_job(repo, job, real_browser, leases, guard):
                 break
             if not (await real_browser.health()).available:
                 return  # Keep unfinished work leased for recovery; never mark complete.
-            page = await source.fetch_page(job.payload, cursor=cursor, limit=min(job.payload['target_count'], 20), cancelled=cancelled)
+            page = await source.fetch_page(job.payload, cursor=cursor,
+                limit=min(job.payload['target_count'] - len(processed), 20), cancelled=cancelled)
             log.info('provider_page_received transient_payload_discarded')
             for row in page.records:
                 if cancelled() or len(processed) >= job.payload['target_count']:
@@ -92,11 +96,14 @@ async def process_job(repo, job, real_browser, leases, guard):
                 if row['provider_record_id'] in processed:
                     continue
                 processed.add(row['provider_record_id'])
+                validate_reference(row['provider'], row['provider_record_id'])
+                if not offline and fixture_url(row.get('website_url')):
+                    raise ValueError('Fixture navigation rejected in LIVE')
                 item = repo.add_reference(job.id, token, row['provider'], row['provider_record_id'])
                 if not repo.begin_item(job.id, token, item.id):
                     continue
                 if not (await real_browser.health()).available:
-                    # Leave lease to expire; no more discovery until browser ready.
+                    repo.finish(job.id, token, error='browser_unavailable')
                     return
                 session = await browser.open_session()
                 cleanup_id = repo.register_cleanup(job.id, token, session.user_id)
@@ -123,6 +130,12 @@ async def process_job(repo, job, real_browser, leases, guard):
         if not lost.is_set():
             repo.finish(job.id, token)
             log.info('job_finished database=postgresql')
+    except DiscoveryError:
+        repo.finish(job.id, token, error='live_discovery_unavailable')
+        log.warning('live_discovery_unavailable no_fixture_fallback')
+    except (ValueError, RuntimeError):
+        repo.finish(job.id, token, error='live_configuration_or_data_rejected')
+        log.warning('live_configuration_or_data_rejected')
     except LeaseLost:
         log.warning('job_lease_lost stale_write_rejected')
     except asyncio.CancelledError:
@@ -150,6 +163,15 @@ async def run():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     log.info('worker_started database=postgresql')
+    async def advertise():
+        while not stop.is_set():
+            try:
+                available = check_database() and redis_ready() and (await browser.health()).available
+                publish_ready(available)
+            except Exception:
+                log.warning('worker_readiness_unavailable')
+            await asyncio.sleep(2)
+    readiness_task = asyncio.create_task(advertise())
     try:
         while not stop.is_set():
             try:
@@ -187,6 +209,12 @@ async def run():
                 log.warning('worker_dependencies_reconnecting')
                 await asyncio.sleep(1)
     finally:
+        readiness_task.cancel()
+        await asyncio.gather(readiness_task, return_exceptions=True)
+        try:
+            publish_ready(False)
+        except redis.RedisError:
+            pass
         await browser.shutdown()
 
 if __name__ == '__main__':

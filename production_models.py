@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 import uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, DateTime, Text, Float, Integer, Boolean, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import String, DateTime, Text, Float, Integer, Boolean, ForeignKey, UniqueConstraint, Index, CheckConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 
 def utcnow():
@@ -36,6 +36,9 @@ class SecurityEvent(Record, Base):
 
 class SearchJob(Record, Base):
     __tablename__ = 'search_jobs'
+    __table_args__ = (CheckConstraint("run_mode IN ('live', 'offline_test', 'legacy')", name='ck_search_jobs_run_mode'),
+                     Index('ix_search_jobs_owner_mode', 'user_id', 'run_mode'))
+    run_mode: Mapped[str] = mapped_column(String(16), default='live', server_default='legacy')
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
     status: Mapped[str] = mapped_column(String(32), default='queued', index=True)
     payload: Mapped[dict] = mapped_column(JSONB)
@@ -49,6 +52,9 @@ class SearchJob(Record, Base):
 
 class Business(Record, Base):
     __tablename__ = 'businesses'
+    __table_args__ = (CheckConstraint("run_mode IN ('live', 'offline_test', 'legacy')", name='ck_businesses_run_mode'),
+                     Index('ix_businesses_owner_mode', 'user_id', 'run_mode'))
+    run_mode: Mapped[str] = mapped_column(String(16), default='live', server_default='legacy')
     user_id: Mapped[str] = mapped_column(ForeignKey('users.id'), index=True)
     browser_observed_url: Mapped[str | None] = mapped_column(Text)
     browser_observed_name: Mapped[str | None] = mapped_column(Text)

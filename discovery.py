@@ -127,9 +127,9 @@ class ProviderDiscovery:
                 more = bool(places) and end < min(total, 240)
                 return DiscoveryPage(rows, end if more else None, None if more else "provider_limit" if end >= 240 else "discovery_exhausted")
             if self.name == "google_places_new":
-                query_body = {"textQuery": query, "pageSize": 20, "regionCode": "US", "languageCode": "en"}
+                query_body = {"textQuery": query, "pageSize": min(limit, 20), "regionCode": "US", "languageCode": "en"}
                 if cursor:
-                    query_body = {"textQuery": query, "pageSize": 20, "regionCode": "US", "languageCode": "en", "pageToken": cursor}
+                    query_body = {"textQuery": query, "pageSize": min(limit, 20), "regionCode": "US", "languageCode": "en", "pageToken": cursor}
                 mask = "places.id,places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.rating,places.userRatingCount,places.primaryType,places.businessStatus,nextPageToken"
                 data = await self._json(http, "POST", "https://places.googleapis.com/v1/places:searchText", headers={"X-Goog-Api-Key": self._key, "X-Goog-FieldMask": mask, "Content-Type": "application/json"}, json=query_body)
                 places = data.get("places")

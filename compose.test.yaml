@@ -1,4 +1,20 @@
+name: leadpro-offline-test
+x-offline-env: &offline-env
+  LOCAL_RUN_MODE: offline_test
+  APP_ORIGIN: https://localhost:8444
+  DISCOVERY_MODE: offline
+  LOCAL_INTEGRATION_TEST: "true"
+  OFFLINE_ITEM_DELAY: "2"
+  GOOGLE_PLACES_NEW_API_KEY: ""
 services:
+  caddy:
+    ports: !override ["127.0.0.1:8444:443"]
+  api:
+    environment:
+      <<: *offline-env
+  worker:
+    environment:
+      <<: *offline-env
   integration:
     image: leadpro-phase4a2:test
     environment:
@@ -13,3 +29,13 @@ services:
     tmpfs: [/tmp]
     command: python -m pytest -q -o cache_dir=/tmp/pytest_cache
     profiles: [test]
+volumes:
+  pgdata:
+    name: leadpro-offline-test_pgdata
+    external: false
+  caddy_data:
+    name: leadpro-offline-test_caddy_data
+    external: false
+  caddy_config:
+    name: leadpro-offline-test_caddy_config
+    external: false

@@ -1114,3 +1114,5 @@ th, td { text-align: left; vertical-align: top; padding: 12px; min-width: 120px;
 #recent-jobs { display: grid; gap: 8px; list-style: none; padding: 0; }
 body.theme-light #business-detail { background: #fff; color: #0f172a; }
 @media (max-width: 600px) { #business-detail { padding: 16px; width: 96vw; } .score-grid { gap: 8px; } }
+
+.run-mode-banner:not([hidden]) { position: sticky; top: 0; z-index: 100; padding: 12px; background: #fbbf24; color: #1c1917; text-align: center; font-weight: 700; }

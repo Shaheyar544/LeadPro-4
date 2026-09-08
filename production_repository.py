@@ -4,6 +4,7 @@ from sqlalchemy import select, func, or_, and_
 from production_models import *
 from production_db import transaction
 from production_scoring import score_browser_evidence
+from local_modes import run_mode, validate_reference, fixture_url
 
 LEASE_SECONDS = 12
 
@@ -19,7 +20,7 @@ class ProductionRepository:
             job = db.scalar(select(SearchJob).where(or_(
                 SearchJob.status == 'queued',
                 and_(SearchJob.status == 'running', SearchJob.lease_until < utcnow())
-            )).order_by(SearchJob.created_at).with_for_update(skip_locked=True).limit(1))
+            ), SearchJob.run_mode == run_mode()).order_by(SearchJob.created_at).with_for_update(skip_locked=True).limit(1))
             if job is None:
                 return None
             if job.cancel_requested:
@@ -35,7 +36,7 @@ class ProductionRepository:
 
     def owned(self, db, job_id, token):
         job = db.scalar(select(SearchJob).where(SearchJob.id == job_id).with_for_update())
-        if not job or job.status != 'running' or job.lease_token != token or job.lease_until <= utcnow():
+        if not job or job.run_mode != run_mode() or job.status != 'running' or job.lease_token != token or job.lease_until <= utcnow():
             raise LeaseLost()
         return job
 
@@ -51,20 +52,21 @@ class ProductionRepository:
             return self.owned(db, job_id, token).cancel_requested
 
     def add_reference(self, job_id, token, provider, record_id):
-        if provider != 'google_places_new' or not record_id or len(record_id) > 300:
-            raise ValueError('Disallowed provider reference')
+        validate_reference(provider, record_id)
         with transaction() as db:
             job = self.owned(db, job_id, token)
             ref = db.scalar(select(ProviderRef).where(ProviderRef.user_id == job.user_id,
                 ProviderRef.provider == provider, ProviderRef.provider_record_id == record_id))
             if ref is None:
-                business = Business(user_id=job.user_id)
+                business = Business(user_id=job.user_id, run_mode=job.run_mode)
                 db.add(business)
                 db.flush()
                 ref = ProviderRef(user_id=job.user_id, business_id=business.id,
                                   provider=provider, provider_record_id=record_id)
                 db.add(ref)
                 db.flush()
+            if db.get(Business, ref.business_id).run_mode != job.run_mode:
+                raise ValueError('Business run mode mismatch')
             item = db.scalar(select(SearchJobItem).where(SearchJobItem.job_id == job_id,
                                                         SearchJobItem.business_id == ref.business_id))
             if item is None:
@@ -77,6 +79,8 @@ class ProductionRepository:
         with transaction() as db:
             job = self.owned(db, job_id, token)
             item = db.get(SearchJobItem, item_id)
+            if not item or item.job_id != job_id:
+                raise LeaseLost()
             if item.status == 'completed' or job.cancel_requested:
                 return False
             item.status = 'running'
@@ -96,7 +100,8 @@ class ProductionRepository:
 
     def cleanup_pending(self):
         with transaction() as db:
-            return list(db.scalars(select(BrowserCleanup).where(BrowserCleanup.pending)))
+            return list(db.scalars(select(BrowserCleanup).join(SearchJob).where(
+                BrowserCleanup.pending, SearchJob.run_mode == run_mode())))
 
     def save_audit(self, job_id, token, item_id, audit):
         """Only the BrowserProvider/AuditEngine result enters this boundary."""
@@ -104,11 +109,19 @@ class ProductionRepository:
         with transaction() as db:
             job = self.owned(db, job_id, token)
             item = db.get(SearchJobItem, item_id)
+            if not item or item.job_id != job_id:
+                raise LeaseLost()
             if item.status == 'completed':
                 return
             if job.cancel_requested:
                 raise LeaseLost()
             business = db.get(Business, item.business_id)
+            if business.run_mode != job.run_mode:
+                raise ValueError('Business run mode mismatch')
+            if job.run_mode == 'live' and (fixture_url(audit.get('final_url')) or any(
+                fixture_url(p.get('final_url')) or p.get('title') == 'Independently observed business'
+                for p in audit['pages'])):
+                raise ValueError('Fixture browser output rejected in LIVE')
             # Provider input is never passed here. Only successfully observed pages.
             observed = [p for p in audit['pages'] if p.get('status') in ('completed', 'partial')]
             if observed:

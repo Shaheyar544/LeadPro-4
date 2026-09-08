@@ -29,24 +29,45 @@ Read the [product contract](docs/V0_1_PRODUCT_CONTRACT.md),
 [CamoFox setup](docs/CAMOFOX_SETUP.md) and
 [Phase 3B architecture/scoring](docs/PHASE_3B_ARCHITECTURE.md).
 
-## One-click local launch
+## Run locally — LIVE
 
-For the existing [validated Docker setup](docs/DEPLOYMENT_DOCKER.md):
-
-1. Start Docker Desktop in Linux-container mode.
+1. Start Docker Desktop.
 2. Double-click `START_LOCAL.bat`.
-3. Wait for all six services to become healthy and the browser to open.
-4. Double-click `STOP_LOCAL.bat` when finished.
+3. Browser opens.
+4. Run a real search.
+5. Double-click `STOP_LOCAL.bat` when finished.
 
-The launchers use `compose.production.yaml` and the existing private
-`.local-integration/stack.env`; a missing configuration stops with its exact path.
-Complete the linked one-time database setup first. The dashboard is
-`https://localhost:8443`; its local Caddy CA may require browser trust. Launchers
-do not change Windows certificate trust. STOP preserves PostgreSQL data and all
-Compose volumes. PowerShell 7 is preferred, with Windows PowerShell as fallback;
-the HTTPS health check uses Windows `curl.exe`. Errors remain visible in the window.
+LIVE uses Google Places API (New), real private CamoFox, PostgreSQL and Redis.
+It never silently falls back to fixtures. Missing configuration stops startup;
+provider authorization/network errors fail the search visibly. Worker/browser
+readiness is checked before discovery. Use `STATUS_LOCAL.bat` for service status.
 
-## Local setup (Windows PowerShell)
+The launchers load the existing ignored `.env` discovery key, then
+`.local-integration/stack.env` production secrets (which take precedence).
+`GOOGLE_PLACES_NEW_API_KEY` is preferred; the existing `GOOGLE_PLACES_API_KEY`
+is accepted as the key for the **New** endpoint. This does not enable Legacy.
+Mode selection is fixed by the launcher and Compose files, regardless of old
+`DISCOVERY_MODE=offline` values in those environment files.
+
+LIVE opens `https://localhost:8443`, reuses the existing PostgreSQL volume and
+accounts, and runs Alembic before starting the API/worker. Sign in as `admin`
+with the existing account password. Editing the bootstrap password does not
+reset an existing account; use Settings > Change password while signed in.
+Caddy's local CA may need browser trust; the launcher does not alter Windows
+trust settings. See [Docker setup](docs/DEPLOYMENT_DOCKER.md).
+
+`START_OFFLINE_TEST.bat` is only for fixture/regression testing. It uses a
+separate project, PostgreSQL volume and `https://localhost:8444`, with an obvious
+**OFFLINE TEST MODE — fixture data** banner and no paid discovery keys.
+Stop it with `STOP_OFFLINE_TEST.bat`. Both STOP helpers preserve volumes.
+
+`CLEAN_FIXTURE_DATA.bat` first displays counts, then requires `DELETE FIXTURES`
+to remove positively identified fixtures and their related records in one
+transaction. It preserves real data, users, sessions and security events.
+Unclassified older history is retained and hidden from LIVE, never guessed to
+be disposable. A private backup is recommended before maintenance.
+
+## Legacy development setup (Windows PowerShell)
 
 Python 3.11+ is required. Windows startup no longer depends on Unix file locking.
 Run from the repository directory:

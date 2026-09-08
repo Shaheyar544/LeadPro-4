@@ -2,6 +2,7 @@
 import os
 from urllib.parse import urlsplit
 from production_boundary import validate_production_settings
+from local_modes import run_mode, validate_mode
 
 def validate_production_config():
     if os.getenv('APP_ENV') != 'production':
@@ -13,8 +14,9 @@ def validate_production_config():
             raise RuntimeError('Unsafe production configuration: ' + name)
     if os.getenv('RELOAD', 'false') != 'false':
         raise RuntimeError('Reload is forbidden')
-    if os.getenv('APP_ORIGIN') != 'https://localhost:8443':
-        raise RuntimeError('Phase 4A local origin must be https://localhost:8443')
+    port = '8444' if run_mode() == 'offline_test' else '8443'
+    if os.getenv('APP_ORIGIN') != 'https://localhost:' + port:
+        raise RuntimeError('Origin does not match the selected local mode')
     if os.getenv('CAMOFOX_BASE_URL') != 'http://camofox:9377':
         raise RuntimeError('Unsafe CamoFox service URL')
     required = {'CAMOFOX_INTERACTIVE': 'off', 'CAMOFOX_CRASH_REPORT_ENABLED': 'false',
@@ -23,9 +25,5 @@ def validate_production_config():
         raise RuntimeError('Unsafe CamoFox configuration')
     if urlsplit(os.getenv('REDIS_URL', '')).scheme not in {'redis', 'rediss'}:
         raise RuntimeError('Invalid Redis URL')
-    mode = os.getenv('DISCOVERY_MODE', 'disabled')
-    if mode not in {'disabled', 'offline', 'google_places_new'}:
-        raise RuntimeError('Unsupported discovery policy')
-    if mode == 'offline' and os.getenv('LOCAL_INTEGRATION_TEST') != 'true':
-        raise RuntimeError('Offline fixture requires explicit local integration mode')
+    validate_mode()
     return True
