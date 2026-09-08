@@ -98,12 +98,12 @@ The complete job, discovery state, item statuses, audit history, scores and cont
 
 ## CSV validation
 
-The existing job-scoped export path was exercised for the authenticated owner. Formula-safe cells and status fields remained intact; Google provider provenance and browser evidence/contact source URLs remain distinguishable. No raw evidence blobs or credentials were exported.
+The authenticated owner-scoped export was exercised (the current endpoint scopes rows to that owner rather than accepting an arbitrary job ID). Formula-safe cells and status fields remained intact; Google provider provenance and browser evidence/contact source URLs are distinguishable. No raw evidence blobs or credentials were exported.
 
 ## Provider integrations
 
 - Serper: pass.
-- Google Places Legacy: pass (rollback adapter smoke).
+- Google Places Legacy: offline rollback adapter tests pass; live smoke was not configured for this run.
 - Yelp: pass.
 - Google Places New: pass (authorized live integration and benchmark provider).
 
