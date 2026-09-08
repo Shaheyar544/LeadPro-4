@@ -1,7 +1,7 @@
 # PHASE 3C.2 COMPLETE — Benchmark Report
 
-Date: 2026-09-08 (Asia/Karachi)  
-Branch: `lead-engine-v1`  
+Date: 2026-09-08 (Asia/Karachi)
+Branch: `lead-engine-v1`
 Base: `1fda0d3`
 
 ## Why Legacy is no longer benchmark primary
