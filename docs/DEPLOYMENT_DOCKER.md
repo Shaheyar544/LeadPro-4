@@ -65,6 +65,8 @@ docker compose --env-file .local-integration/stack.env -f compose.production.yam
 python scripts/validate_local_stack.py
 python scripts/validate_local_stack.py --ui
 python scripts/validate_local_stack.py --extras
+python scripts/validate_local_stack.py --coordination
+python scripts/validate_local_stack.py --secret-scan
 ```
 
 Use the repository virtualenv on Windows. The UI smoke requires installed Edge
@@ -76,6 +78,9 @@ The harness restarts local services, tests revocation, restores the original
 test password, and leaves additional synthetic records for inspection.
 `--extras` runs backup/restore into a new database and the harmless example.com
 browser smoke. It never calls a live discovery provider.
+`--coordination` temporarily runs two workers, tests Redis restart with global
+capacity one, and returns to one worker. `--secret-scan` scans candidate source
+files with the pinned Gitleaks image; pull that image first if it is not cached.
 
 ## Regression image
 
