@@ -93,6 +93,12 @@ class EngineStore:
                          (jid, user, request.category, request.city, request.state, request.target_count, request.opportunity_profile, now()))
         return self.job(jid, user)
 
+    def owner_has_capacity(self, user):
+        """Read-only capacity check used before live browser preflight."""
+        with self.transaction() as conn:
+            count = conn.execute("SELECT count(*) FROM search_jobs WHERE user_id=? AND status IN ('queued','running')", (user,)).fetchone()[0]
+        return count < 10
+
     def job(self, jid, user=None):
         with self.transaction() as conn:
             row = conn.execute("SELECT * FROM search_jobs WHERE id=?" + (" AND user_id=?" if user else ""), (jid, user) if user else (jid,)).fetchone()

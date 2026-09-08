@@ -1,7 +1,7 @@
 import os
 import unittest
 from unittest.mock import AsyncMock, patch
-from discovery import ProviderDiscovery, provider_readiness
+from discovery import DiscoveryError, ProviderDiscovery, provider_readiness
 from engine_config import EngineConfig
 from engine_worker import PersistentWorker
 from tests.engine_fixtures import FixtureStore, REQUEST
@@ -50,12 +50,75 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_google_activation_retry_once_and_cancellation(self):
         provider=ProviderDiscovery("google_places","SECRET")
+        provider._last_google_token = "token"
         provider._json=AsyncMock(side_effect=[{"status":"INVALID_REQUEST"},{"status":"OK","results":[],"next_page_token":"next"}])
         with patch("discovery.asyncio.sleep",new=AsyncMock()) as sleep:
             page=await provider.fetch_page(REQUEST,"token",1)
         self.assertEqual(provider._json.await_count,2)
         self.assertEqual(sleep.await_count,2)
         self.assertEqual(page.cursor,"next")
+
+    async def test_google_fresh_token_retry_succeeds_after_invalid_request(self):
+        provider = ProviderDiscovery("google_places", "SECRET")
+        provider._json = AsyncMock(side_effect=[
+            {"status": "OK", "results": [{"place_id": "p1"}], "next_page_token": "fresh"},
+            {"status": "OK", "result": {"name": "P1", "website": "https://p1.test/"}},
+            {"status": "INVALID_REQUEST"},
+            {"status": "OK", "results": [{"place_id": "p2"}]},
+            {"status": "OK", "result": {"name": "A", "website": "https://a.test/"}},
+        ])
+        with patch("discovery.asyncio.sleep", new=AsyncMock()):
+            first = await provider.fetch_page(REQUEST, None, 20)
+            second = await provider.fetch_page(REQUEST, first.cursor, 20)
+        self.assertEqual(first.cursor, "fresh")
+        self.assertEqual(second.records[0]["canonical_name"], "A")
+        self.assertEqual(second.diagnostics["statuses"], ["INVALID_REQUEST", "OK"])
+        self.assertEqual(second.diagnostics["token_attempts"], 2)
+
+    async def test_google_fresh_token_retry_bound_preserves_page_one(self):
+        provider = ProviderDiscovery("google_places", "SECRET")
+        provider._last_google_token = "fresh"
+        provider._json = AsyncMock(side_effect=[
+            {"status": "INVALID_REQUEST"}, {"status": "INVALID_REQUEST"},
+            {"status": "INVALID_REQUEST"}, {"status": "INVALID_REQUEST"},
+        ])
+        with patch("discovery.asyncio.sleep", new=AsyncMock()) as sleep:
+            with self.assertRaises(DiscoveryError) as caught:
+                await provider.fetch_page(REQUEST, "fresh", 20)
+        self.assertEqual(caught.exception.code, "page_token_not_ready_timeout")
+        self.assertEqual(provider._json.await_count, 4)
+        self.assertEqual(sleep.await_count, 4)
+
+    async def test_google_token_statuses_do_not_retry(self):
+        for status, expected in (("OVER_QUERY_LIMIT", "google_over_query_limit"),
+                                 ("REQUEST_DENIED", "google_request_denied"),
+                                 ("UNKNOWN_ERROR", "google_unknown_error")):
+            provider = ProviderDiscovery("google_places", "SECRET")
+            provider._json = AsyncMock(return_value={"status": status})
+            with patch("discovery.asyncio.sleep", new=AsyncMock()) as sleep:
+                with self.assertRaises(DiscoveryError) as caught:
+                    await provider.fetch_page(REQUEST, "fresh", 20)
+            self.assertEqual(caught.exception.code, expected)
+            self.assertEqual(provider._json.await_count, 1)
+            self.assertEqual(sleep.await_count, 1)
+
+    async def test_google_stale_invalid_token_is_not_token_readiness(self):
+        provider = ProviderDiscovery("google_places", "SECRET")
+        provider._json = AsyncMock(return_value={"status": "INVALID_REQUEST"})
+        with patch("discovery.asyncio.sleep", new=AsyncMock()) as sleep:
+            with self.assertRaises(DiscoveryError) as caught:
+                await provider.fetch_page(REQUEST, "stale", 20)
+        self.assertEqual(caught.exception.code, "google_invalid_request")
+        self.assertEqual(provider._json.await_count, 1)
+        self.assertEqual(sleep.await_count, 1)
+
+    async def test_google_zero_results_completes(self):
+        provider = ProviderDiscovery("google_places", "SECRET")
+        provider._json = AsyncMock(return_value={"status": "ZERO_RESULTS", "results": []})
+        page = await provider.fetch_page(REQUEST, None, 20)
+        self.assertEqual(page.records, [])
+        self.assertIsNone(page.cursor)
+        self.assertEqual(page.terminal_reason, "discovery_exhausted")
 
     async def test_yelp_offsets_dedupe_target_bound_and_no_guessed_site(self):
         for target, pages, expected, count in [(2,3,[0],2),(20,2,[0,2],3)]:

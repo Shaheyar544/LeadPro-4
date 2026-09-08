@@ -82,6 +82,28 @@ class EngineRouteSecurityTests(unittest.TestCase):
 
 
 class CleanupRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_preflight_evaluates_and_cleans_harmless_page(self):
+        fixture = FixtureStore(); self.addCleanup(fixture.close)
+        browser = MockBrowserProvider({"https://example.com/": facts(title="Example Domain")})
+        browser.evaluate = AsyncMock(return_value="Example Domain")
+        worker = PersistentWorker(fixture.store, EngineConfig(settle_ms=0), browser, [])
+        try:
+            await worker.preflight()
+            self.assertEqual(browser.visited, ["https://example.com/"])
+            self.assertFalse(browser.sessions)
+            self.assertEqual(browser.active_pages, 0)
+        finally:
+            await worker.shutdown()
+
+    async def test_live_preflight_fails_closed_when_browser_unavailable(self):
+        fixture = FixtureStore(); self.addCleanup(fixture.close)
+        browser = MockBrowserProvider(available=False)
+        worker = PersistentWorker(fixture.store, EngineConfig(settle_ms=0), browser, None)
+        with self.assertRaises(BrowserError) as caught:
+            await worker.preflight()
+        self.assertEqual(caught.exception.code, "browser_unavailable")
+        self.assertFalse(browser.sessions)
+
     async def test_teardown_failure_is_persisted_and_retried(self):
         fixture = FixtureStore(); self.addCleanup(fixture.close)
         browser = MockBrowserProvider({'https://business.test/': facts()})

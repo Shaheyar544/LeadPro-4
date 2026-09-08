@@ -41,6 +41,34 @@ class PersistentWorker:
         if self.wake:
             self.wake.set()
 
+    async def preflight(self):
+        """Run a harmless real browser operation before live discovery."""
+        health = await self.browser.health()
+        if not health.available:
+            raise BrowserError("browser_unavailable", phase="connect")
+        session = None
+        page = None
+        try:
+            session = await self.browser.open_session()
+            page = await self.browser.open_page(session, "https://example.com/")
+            title = await self.browser.evaluate(page, "document.title")
+            if not isinstance(title, str) or not title.strip():
+                raise BrowserError("browser_protocol_error", phase="evaluate")
+        finally:
+            cleanup_error = None
+            if page is not None:
+                try:
+                    await self.browser.close_page(page)
+                except Exception as exc:
+                    cleanup_error = exc
+            if session is not None:
+                try:
+                    await self.browser.close_session(session)
+                except Exception as exc:
+                    cleanup_error = cleanup_error or exc
+            if cleanup_error is not None:
+                raise cleanup_error
+
     async def shutdown(self):
         if self.task:
             self.task.cancel()
@@ -128,6 +156,9 @@ class PersistentWorker:
                 try:
                     page = await source.fetch_page(job, state["cursor"], min(20, remaining), lambda: self.cancelled(jid))
                     state = {"pages": state["pages"] + 1, "cursor": page.cursor, "done": page.cursor is None}
+                    if getattr(page, "diagnostics", None):
+                        state.update(page.diagnostics)
+                        state["page"] = state["pages"]
                     error = error if error not in (None, "discovery_exhausted") else page.terminal_reason or error
                     if state["pages"] >= max_pages and not state["done"]:
                         state["done"], error = True, "provider_limit"

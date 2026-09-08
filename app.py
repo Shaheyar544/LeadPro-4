@@ -571,6 +571,16 @@ async def api_gen_audit_page(lead_id: int, user: str = Depends(get_current_user)
 @app.post("/api/leadgen/start", status_code=202)
 async def api_start_leadgen(req: LeadGenRequest, user: str = Depends(get_current_user)):
     from discovery import configured_sources
+    # Preserve the bounded per-owner queue response without touching providers.
+    if evidence_worker.sources is None and not engine_store.owner_has_capacity(user):
+        raise HTTPException(429, "Job queue capacity reached", headers={"Retry-After": "10"})
+    # Production live discovery must prove the real browser path first. Tests
+    # inject explicit sources; that path is intentionally offline-only.
+    if evidence_worker.sources is None:
+        try:
+            await evidence_worker.preflight()
+        except Exception:
+            raise HTTPException(503, "PHASE 3C.1 BLOCKED — CAMOFOX PREFLIGHT FAILED") from None
     if not (evidence_worker.sources if evidence_worker.sources is not None else configured_sources()):
         raise HTTPException(503, "Configure a discovery provider API key and restart before starting a search")
     try:

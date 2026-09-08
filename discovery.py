@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+import time
 from urllib.parse import quote
 import aiohttp
 from engine_store import domain
@@ -21,6 +22,7 @@ class DiscoveryPage:
     records: list[dict] = field(default_factory=list)
     cursor: str | int | None = None
     terminal_reason: str | None = None
+    diagnostics: dict = field(default_factory=dict)
 
 
 def text(value, length=300):
@@ -66,14 +68,15 @@ def record(provider, raw, job):
 class ProviderDiscovery:
     def __init__(self, name, key):
         self.name, self._key = name, key
+        self._last_google_token = None
 
     async def _json(self, http, method, url, **kwargs):
         try:
             async with http.request(method, url, allow_redirects=False, **kwargs) as response:
                 if response.status == 429:
-                    raise DiscoveryError("provider_limit")
+                    raise DiscoveryError("google_over_query_limit" if self.name == "google_places" else "provider_limit")
                 if response.status != 200:
-                    raise DiscoveryError("provider_unavailable")
+                    raise DiscoveryError("google_http_error" if self.name == "google_places" else "provider_unavailable")
                 chunks, size = [], 0
                 async for chunk in response.content.iter_chunked(65536):
                     size += len(chunk)
@@ -84,10 +87,12 @@ class ProviderDiscovery:
                 if not isinstance(data, dict):
                     raise ValueError
                 return data
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            raise DiscoveryError("provider_unavailable") from None
+        except asyncio.TimeoutError:
+            raise DiscoveryError("google_transport_timeout" if self.name == "google_places" else "provider_unavailable") from None
+        except aiohttp.ClientError:
+            raise DiscoveryError("google_http_transport_error" if self.name == "google_places" else "provider_unavailable") from None
         except (ValueError, UnicodeError):
-            raise DiscoveryError("provider_protocol_error") from None
+            raise DiscoveryError("google_malformed_response" if self.name == "google_places" else "provider_protocol_error") from None
 
     async def fetch_page(self, job, cursor=None, limit=20, cancelled=lambda: False):
         limit = max(1, min(limit, 20))
@@ -123,14 +128,40 @@ class ProviderDiscovery:
                 raise DiscoveryError("provider_protocol_error")
             params = {"key": self._key, "language": "en"}
             params.update({"pagetoken": cursor} if cursor else {"query": query})
+            token_attempts = 0
+            statuses = []
+            token_started = time.monotonic() if cursor else None
+            fresh_token = bool(cursor and cursor == self._last_google_token)
             if cursor:
                 await asyncio.sleep(2)  # Legacy next_page_token activation delay.
-            data = await self._json(http, "GET", "https://maps.googleapis.com/maps/api/place/textsearch/json", params=params)
-            if data.get("status") == "INVALID_REQUEST" and cursor:
-                await asyncio.sleep(2)  # One bounded activation retry, not block evasion.
+            while True:
+                token_attempts += 1 if cursor else 0
                 data = await self._json(http, "GET", "https://maps.googleapis.com/maps/api/place/textsearch/json", params=params)
-            if data.get("status") not in {"OK", "ZERO_RESULTS"}:
-                raise DiscoveryError("provider_limit" if data.get("status") == "OVER_QUERY_LIMIT" else "provider_unavailable")
+                status = data.get("status")
+                statuses.append(status if isinstance(status, str) else "MALFORMED")
+                # A fresh token can briefly return INVALID_REQUEST. Retry only
+                # this immediately-following token, with a strict four-request
+                # bound and no retry for arbitrary first-page requests.
+                if status == "INVALID_REQUEST" and fresh_token and token_attempts < 4:
+                    await asyncio.sleep(2)
+                    continue
+                break
+            if status not in {"OK", "ZERO_RESULTS"}:
+                error_codes = {
+                    "INVALID_REQUEST": "page_token_not_ready_timeout" if fresh_token else "google_invalid_request",
+                    "OVER_QUERY_LIMIT": "google_over_query_limit",
+                    "REQUEST_DENIED": "google_request_denied",
+                    "UNKNOWN_ERROR": "google_unknown_error",
+                }
+                raise DiscoveryError(error_codes.get(status, "google_malformed_response" if not isinstance(status, str) else "google_provider_error"))
+            diagnostics = {
+                "page": 1 if not cursor else 2,
+                "token_attempts": token_attempts,
+                "token_wait_ms": round((time.monotonic() - token_started) * 1000) if token_started else 0,
+                "statuses": statuses,
+            }
+            if status == "ZERO_RESULTS":
+                return DiscoveryPage([], None, "discovery_exhausted", diagnostics)
             rows = []
             for place in data.get("results", [])[:limit]:
                 if cancelled():
@@ -140,13 +171,17 @@ class ProviderDiscovery:
                     continue
                 details = await self._json(http, "GET", "https://maps.googleapis.com/maps/api/place/details/json", params={"place_id": pid, "key": self._key, "fields": "name,formatted_address,formatted_phone_number,website,rating,user_ratings_total,url"})
                 if details.get("status") not in {"OK", "ZERO_RESULTS", "NOT_FOUND"}:
-                    raise DiscoveryError("provider_limit" if details.get("status") == "OVER_QUERY_LIMIT" else "provider_unavailable")
+                    detail_status = details.get("status")
+                    detail_codes = {"OVER_QUERY_LIMIT": "google_over_query_limit", "REQUEST_DENIED": "google_request_denied", "UNKNOWN_ERROR": "google_unknown_error", "INVALID_REQUEST": "google_invalid_request"}
+                    raise DiscoveryError(detail_codes.get(detail_status, "google_provider_error"))
                 p = details.get("result") or place
                 r = record(self.name, {"id": pid, "name": p.get("name"), "website": p.get("website"), "phone": p.get("formatted_phone_number"), "address": p.get("formatted_address"), "rating": p.get("rating"), "reviews": p.get("user_ratings_total"), "source_url": p.get("url") or "https://www.google.com/maps/search/?api=1&query=" + quote(p.get("name", "")) + "&query_place_id=" + quote(pid)}, job)
                 if r:
                     rows.append(r)
             cursor = data.get("next_page_token")
-            return DiscoveryPage(rows, cursor, None if cursor else "discovery_exhausted")
+            self._last_google_token = cursor
+            diagnostics["next_page_token"] = bool(cursor)
+            return DiscoveryPage(rows, cursor, None if cursor else "discovery_exhausted", diagnostics)
 
 
 def configured_sources():
