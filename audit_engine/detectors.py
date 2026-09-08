@@ -4,7 +4,7 @@ from urllib.parse import urlsplit, unquote, urljoin
 from engine_store import now, uid, domain
 from url_safety import normalize_url, UnsafeURL
 
-VERSION = "rendered_dom_v1.2"
+VERSION = "rendered_dom_v1.3"
 KEYS = (
     "reachable", "final_url", "https", "title", "viewport_meta", "rendered_page_status",
     "email", "phone", "mailto", "tel", "contact_page", "facebook", "instagram", "linkedin", "youtube",
@@ -87,13 +87,13 @@ def selected_links(links, homepage, max_pages=3):
         description = unquote(p.path) + " " + str(link.get("text", ""))
         if re.search(r"login|log.?out|sign.?in|account|cart|checkout|privacy|terms|download|\.(pdf|zip|docx?|xlsx?|exe)(?:$|\s)", description, re.I):
             continue
-        page_type = "contact" if re.search(r"contact|quote|estimate", description, re.I) else "about" if re.search(r"about", description, re.I) else "services" if re.search(r"services?", description, re.I) else None
+        page_type = "contact" if re.search(r"contact", description, re.I) else "quote" if re.search(r"quote|estimate", description, re.I) else "booking" if re.search(r"book|schedule|appointment|reserve", description, re.I) else "about" if re.search(r"about", description, re.I) else "services" if re.search(r"services?", description, re.I) else None
         if page_type and url.rstrip("/") != homepage.rstrip("/"):
-            rank = 0 if re.search("contact", description, re.I) else 1 if page_type == "contact" else 2 if page_type == "about" else 3
+            rank = {"contact": 0, "quote": 1, "booking": 2, "about": 3, "services": 4}[page_type]
             candidates.append((rank, url, page_type))
     selected, seen, types = [], {homepage.rstrip("/")}, set()
     for _, url, page_type in sorted(candidates):
-        group = "contact" if page_type == "contact" else "secondary"
+        group = page_type if page_type in {"contact", "quote", "booking"} else "secondary"
         if group in types or url.rstrip("/") in seen:
             continue
         selected.append((url, page_type)); seen.add(url.rstrip("/")); types.add(group)
@@ -193,7 +193,7 @@ def detect(facts, page):
         add(key, cta.get("text") or cta.get("href"), excerpt=cta.get("text") or cta.get("href", ""), locator=cta.get("locator") or "a,button,input[type=submit]")
     cta = actionable[0] if actionable else {}
     add("primary_cta", cta.get("text") or cta.get("href"), excerpt=cta.get("text", ""), locator=cta.get("locator", ""), confidence=0.8)
-    resources = " ".join(facts.get("resources", [])).lower()
+    resources = " ".join(facts.get("resources", []) + [str(i.get("src", "")) + " " + str(i.get("title", "")) + " " + str(i.get("label", "")) for i in facts.get("iframes", []) if isinstance(i, dict)]).lower()
     signatures = {"booking_widget": r"calendly\.com|acuityscheduling\.com|squareup\.com/appointments|booksy\.com|setmore\.com|simplybook\.", "chat_widget": r"tawk\.to|intercom(?:cdn)?\.com|crisp\.chat|drift\.com|tidio\.(?:co|com)|livechatinc\.com|zopim\.com|https://webchat\.birdeye\.com/"}
     for key, pattern in signatures.items():
         match = re.search(pattern, resources)

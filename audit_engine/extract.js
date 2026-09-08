@@ -57,6 +57,8 @@
   }));
   const ctas = [...document.querySelectorAll('a,button,input[type="submit"]')].filter(visible).slice(0, 300)
     .map(el => ({text: clean(el.innerText || el.value), href: clean(el.href, 2048), locator: locator(el)}));
+  const iframeNodes = [...document.querySelectorAll('iframe')].filter(visible).slice(0, 50);
+  const iframes = iframeNodes.map(el => ({src: clean(el.src, 350), title: clean(el.title), label: clean(el.getAttribute('aria-label') || el.parentElement?.innerText)}));
   const resources = [...document.querySelectorAll('script[src],link[href],iframe[src]')].slice(0, 250)
     .map(el => clean(el.src || el.href, 350));
   // Match signatures in inline scripts without returning their source or contact strings.
@@ -67,7 +69,7 @@
     blocked, soft_error: softError, soft_error_excerpt: softError ? clean(errorText) : "",
     body_available: !!document.body, text_length: bodyText.trim().length, link_count: anchors.length,
     limits_reached: count >= 10000 || anchors.length > 250 || allForms.length > 30 || contacts.length >= 150 || bodyText.length >= 150000,
-    links, contacts: contacts.slice(0, 150), forms, ctas, resources,
+    links, contacts: contacts.slice(0, 150), forms, ctas, resources, iframes,
     generator: clean(document.querySelector('meta[name="generator"]')?.content),
     tracking: {ga: /gtag\(\s*['"]config['"]\s*,\s*['"]G-|google-analytics\.com|analytics\.js/.test(inline),
       gtm: /GTM-[A-Z0-9]+/.test(inline), meta_pixel: /fbq\(\s*['"]init['"]/.test(inline)},

@@ -10,6 +10,23 @@ QUOTE_CATEGORIES = r"plumb|roof|paint|hvac|landscap|remodel|clean|electric|contr
 BOOKING_CATEGORIES = r"dent|salon|spa\b|barber|veterinar|chiropract|physiotherap|auto repair|massage"
 
 
+def has_public_contact_path(audit):
+    """A verified public business phone, email, form, booking or contact page."""
+    if any(c.get("confidence", 0) >= 0.8 for c in audit.get("contacts", [])):
+        return True
+    return any(e.get("detector_key") in {"contact_form", "quote_form", "booking_form", "contact_page"}
+               and e.get("status") == "present" for e in audit.get("evidence", []))
+
+
+def commercially_usable_v2(business, audit, score, identity_confidence=1.0):
+    """Conservative v2 rule; partial audits require medium confidence."""
+    return bool(identity_confidence >= 0.7 and business.get("website_url") and
+                audit.get("status") in {"completed", "partial"} and
+                score.get("opportunity_score") is not None and
+                score.get("evidence_confidence", 0) >= 40 and
+                has_public_contact_path(audit))
+
+
 def bounded(value):
     return round(max(0, min(100, value)), 2)
 

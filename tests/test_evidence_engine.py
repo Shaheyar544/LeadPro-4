@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 from audit_engine.detectors import detect, evidence, aggregate, phone_number, email_address, selected_links, social_url, KEYS
 from audit_engine.runner import AuditEngine
-from audit_engine.scoring import score_audit, WEIGHTS
+from audit_engine.scoring import score_audit, WEIGHTS, commercially_usable_v2, has_public_contact_path
 from browser.base import BrowserError
 from browser.mock import MockBrowserProvider
 from engine_config import EngineConfig
@@ -42,7 +42,7 @@ class DetectorTests(unittest.TestCase):
         for row in rows:
             if row['status']=='present':
                 self.assertTrue(row['locator'] or row['excerpt'], row['detector_key'])
-                self.assertEqual(row['detector_version'], 'rendered_dom_v1.2')
+        self.assertEqual(row['detector_version'], 'rendered_dom_v1.3')
         for href in ['https://youtu.be/video', 'https://youtu.be/@business', 'https://youtube.com/watch?v=123', 'https://youtube.com/shorts/123']:
             self.assertIsNone(social_url(href, 'youtube'))
         self.assertEqual(social_url('https://youtube.com/channel/UCbusiness', 'youtube'), 'https://youtube.com/channel/UCbusiness')
@@ -109,7 +109,7 @@ class DetectorTests(unittest.TestCase):
             ("/about", "About"), ("/services", "Services"), ("/quote", "Estimate"), ("/contact", "Contact"),
             ("/contact#team", "Contact"), ("https://evil.test/contact", "Contact"),
             ("https://sub.business.test/contact", "Contact"), ("/login", "Contact"), ("/contact.pdf", "Contact")]]
-        self.assertEqual(selected_links(links, "https://business.test/"), [("https://business.test/contact", "contact"), ("https://business.test/about", "about")])
+        self.assertEqual(selected_links(links, "https://business.test/"), [("https://business.test/contact", "contact"), ("https://business.test/quote", "quote")])
         self.assertEqual(selected_links([], "https://business.test/"), [])
         self.assertEqual(selected_links(links, "https://business.test/", 1), [])
         self.assertIsNone(social_url("https://linkedin.com/in/owner", "linkedin"))
@@ -123,6 +123,32 @@ class DetectorTests(unittest.TestCase):
 
 
 class ScoreTests(unittest.TestCase):
+    def test_contact_path_v2_accepts_phone_or_form_without_email(self):
+        audit = {"status": "partial", "contacts": [{"confidence": 0.98}], "evidence": []}
+        score = {"opportunity_score": 30, "evidence_confidence": 55}
+        self.assertTrue(has_public_contact_path(audit))
+        self.assertTrue(commercially_usable_v2({"website_url": "https://example.test"}, audit, score))
+        audit["contacts"] = []
+        audit["evidence"] = [{"detector_key": "quote_form", "status": "present"}]
+        self.assertTrue(has_public_contact_path(audit))
+
+    def test_commercial_v2_rejects_failed_or_low_confidence_or_provider_only(self):
+        base = {"website_url": "https://example.test"}
+        audit = {"status": "failed", "contacts": [{"confidence": 0.98}], "evidence": []}
+        score = {"opportunity_score": 30, "evidence_confidence": 80}
+        self.assertFalse(commercially_usable_v2(base, audit, score))
+        audit["status"] = "partial"; audit["contacts"] = [{"confidence": 0.5}]
+        self.assertFalse(commercially_usable_v2(base, audit, score))
+        score["evidence_confidence"] = 39
+        self.assertFalse(commercially_usable_v2(base, audit, score))
+
+    def test_secondary_page_selection_prioritizes_conversion_actions(self):
+        links = [{"href": "https://example.test/about-us", "text": "About"},
+                 {"href": "https://example.test/services", "text": "Services"},
+                 {"href": "https://example.test/free-estimate", "text": "Free Estimate"},
+                 {"href": "https://example.test/schedule", "text": "Schedule"}]
+        selected = selected_links(links, "https://example.test/", 3)
+        self.assertEqual([kind for _, kind in selected], ["quote", "booking"])
     def audit(self, status="absent"):
         return dict(status="completed", pages=[{"status": "completed"}], contacts=[], evidence=[evidence(k, status) for k in WEIGHTS if k != "pagespeed"])
 
