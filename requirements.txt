@@ -15,3 +15,7 @@ playwright>=1.40.0
 openpyxl>=3.1.0
 twilio>=8.0.0
 pydantic>=2.7.0,<3
+SQLAlchemy>=2.0,<3
+psycopg[binary]>=3.1,<4
+redis>=5,<6
+alembic>=1.13,<2

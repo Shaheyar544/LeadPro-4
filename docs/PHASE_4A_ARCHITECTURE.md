@@ -1,0 +1,1 @@
+# Phase 4A architecture foundation`nAPI and worker are separate processes. PostgreSQL is the production source of truth; Redis provides locks and coordination only. CamoFox is private on the Compose network and has no host port. Production Google Places New persistence is limited to place IDs and browser derived evidence.

@@ -2,6 +2,7 @@
 import csv
 import io
 from utils import csv_safe_cell
+from provider_policy import policy_for
 
 SCORE_FIELDS = ("opportunity_score", "digital_gap", "business_strength", "evidence_confidence", "contact_confidence")
 DETECTOR_FIELDS = ("contact_form", "quote_form", "booking_form", "booking_widget", "chat_widget", "primary_cta", "click_to_call", "request_quote_cta", "booking_cta", "contact_cta", "facebook", "instagram", "linkedin", "youtube", "cms")
@@ -13,8 +14,11 @@ def summary(detail):
     contacts = detail["contacts"]
     findings = score.get("breakdown", {}).get("findings", {})
     source = (detail.get("sources") or [{}])[0]
-    row = dict(id=business["id"], business_name=business["canonical_name"], provider=source.get("provider", ""), provider_record_id=source.get("provider_record_id", ""), category=business["category"],
-               city=business["city"], state=business["state"], website=business["website_url"],
+    provider = source.get("provider", "")
+    policy = policy_for(provider)
+    # Google Places content is transient; durable exports carry only place_id and browser evidence.
+    row = dict(id=business["id"], business_name="" if provider == "google_places_new" else business["canonical_name"], provider=provider, provider_record_id=source.get("provider_record_id", "") if provider == "google_places_new" else source.get("provider_record_id", ""), category=business["category"],
+               city="" if provider == "google_places_new" else business["city"], state="" if provider == "google_places_new" else business["state"], website="" if provider == "google_places_new" else business["website_url"],
                profile=score.get("profile_version", "website_conversion_v1"),
                audit_status=audit.get("status", "pending"), observed_at=audit.get("finished_at"),
                primary_opportunity=score.get("breakdown", {}).get("primary_opportunity"))
