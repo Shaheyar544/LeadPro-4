@@ -43,6 +43,12 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(out["complete"])
         self.assertEqual(d["status"], "partial")
 
+    async def test_small_background_mutations_do_not_block_ready(self):
+        first = facts(text_length=1000, link_count=20)
+        second = facts(text_length=1060, link_count=23)
+        _, d = await self.read([first, second])
+        self.assertEqual(d["status"], "ready")
+
     async def test_later_evaluate_timeout_preserves_previous_facts(self):
         out, d = await self.read([facts(), BrowserError("browser_evaluate_timeout")])
         self.assertEqual(d["status"], "partial")

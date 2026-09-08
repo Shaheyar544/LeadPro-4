@@ -1,4 +1,8 @@
-"""Bounded rendered-DOM observations; never wait for network idle."""
+"""Bounded rendered-DOM observations; never wait for network idle.
+
+Stability is based on meaningful content, allowing small background widget and
+carousel mutations without declaring an otherwise ready page incomplete.
+"""
 import asyncio
 import time
 from browser.base import BrowserError
@@ -50,7 +54,9 @@ async def observe(browser, page, expression, timeout_ms, validate, expected_doma
                                    phase="initial_navigation", http_status=status)
             if usable:
                 latest = facts
-                stable = previous is not None and links == previous[1] and abs(text_size - previous[0]) <= max(20, previous[0] * .02)
+                stable = previous is not None and body and bool(facts.get("title")) and \
+                    abs(links - previous[1]) <= max(10, previous[1] * .25) and \
+                    abs(text_size - previous[0]) <= max(80, previous[0] * .10)
                 if stable and state == "complete" and facts.get("complete") and not invalid:
                     return facts, dict(status="ready", reason=None, samples=samples)
                 reason = "browser_protocol_error" if invalid else "audit_incomplete" if facts.get("limits_reached") else "browser_render_timeout"
