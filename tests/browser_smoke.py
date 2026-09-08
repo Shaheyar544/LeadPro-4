@@ -89,8 +89,13 @@ def main():
                         page.get_by_role("button", name="Start search", exact=True).click()
                     jid = start.value.json()["job_id"]
                     page.reload()
+                    # The legacy development credential is deliberately memory-only.
+                    # Production cookie reload recovery is tested by the Compose smoke.
+                    page.locator('#username').fill('admin'); page.locator('#password').fill(password)
+                    page.get_by_role('button', name='Sign in', exact=True).click()
                     page.locator("#layout").wait_for(state="visible")
                     page.get_by_role("button", name="Lead Generation", exact=True).click()
+                    page.locator('#recent-jobs button').first.click()
                     page.wait_for_function("() => document.getElementById('job-state').textContent.includes('partial')", timeout=30000)
                     assert 'Discovered 2 / 2' in page.locator('#job-log').inner_text()
                     page.get_by_role("button", name="Leads", exact=True).click()
@@ -104,16 +109,24 @@ def main():
                     assert 'office@public-business.test' in page.locator('#detail-content').inner_text()
                     assert page.locator('#detail-content img').count() == 0
                     assert page.locator('#detail-content .status-unknown').count() > 0
+                    technical = page.locator('#detail-content details').filter(has=page.locator('summary', has_text='Show technical evidence')).first
+                    assert not technical.evaluate('node => node.open')
+                    technical.locator('summary').first.click()
+                    assert page.locator('#detail-content .evidence-card').count() > 0
+                    assert page.locator('#detail-content img').count() == 0
+                    assert page.evaluate('typeof window.__xss') == 'undefined'
+                    technical.locator('summary').first.click()
                     page.screenshot(path=str(args.artifact_dir / 'business-evidence.png'), full_page=True)
-                    page.get_by_role('button', name='Close details').click()
+                    page.keyboard.press('Escape')
+                    assert row.get_by_role('button', name='View evidence').evaluate('node => node === document.activeElement')
                     blocked = page.locator('#lead-rows tr').filter(has_text='Blocked business')
                     blocked.get_by_role('button', name='View evidence').click()
                     page.locator('#business-detail').wait_for(state='visible')
                     assert page.locator('#detail-content .status-blocked').count() > 0
-                    assert 'Unknown' in page.locator('#detail-content').inner_text()
+                    assert 'Not enough evidence' in page.locator('#detail-content').inner_text()
                     page.get_by_role('button', name='Close details').click()
                     with page.expect_download() as download:
-                        page.get_by_role("button", name="Export all businesses (CSV)").click()
+                        page.get_by_role("button", name="Export this view (CSV)").click()
                     downloaded = Path(download.value.path()).read_text(encoding='utf-8')
                     assert "'=SUM(1,2)" in downloaded and "'+15125551234" in downloaded
                     page.get_by_role("button", name="Lead Generation", exact=True).click()
@@ -127,6 +140,8 @@ def main():
                     # saved history entry must reconnect without starting work.
                     searches_before_reload = sum(url.endswith('/api/leadgen/start') for url in requests)
                     page.reload()
+                    page.locator('#username').fill('admin'); page.locator('#password').fill(password)
+                    page.get_by_role('button', name='Sign in', exact=True).click()
                     page.locator('#layout').wait_for(state='visible')
                     page.get_by_role('button', name='Lead Generation', exact=True).click()
                     page.locator('#recent-jobs button').filter(has_text='cancelled').first.click()
@@ -141,7 +156,7 @@ def main():
                     page.get_by_role('button', name='Leads', exact=True).click()
                     page.locator('#lead-rows tr').filter(has_text=payload).get_by_role('button', name='View evidence').click()
                     page.locator('#business-detail').wait_for(state='visible')
-                    assert 'Browser service is unavailable' in page.locator('#detail-content').inner_text()
+                    assert 'could not be assessed reliably' in page.locator('#detail-content').inner_text()
                     assert page.locator('#detail-content .status-failed').count() > 0
                     page.get_by_role('button', name='Close details').click()
                     page.get_by_role("button", name="Lead Generation", exact=True).click()
@@ -152,8 +167,9 @@ def main():
                     page.screenshot(path=str(args.artifact_dir / "leadgen-mobile.png"), full_page=True)
                     page.get_by_role("button", name="Settings", exact=True).click()
                     page.locator("#settings-form").wait_for(state="visible")
-                    assert page.locator("#provider-fields input").count() == 5
-                    assert not any(page.locator("#provider-fields input").nth(i).input_value() for i in range(5))
+                    provider_count = page.locator('#provider-fields input').count()
+                    assert provider_count >= 5
+                    assert not any(page.locator("#provider-fields input").nth(i).input_value() for i in range(provider_count))
                     page.get_by_role("button", name="Toggle theme").click()
                     page.screenshot(path=str(args.artifact_dir / "settings-mobile-light.png"), full_page=True)
                     # A response arriving after logout must not reopen sensitive details.

@@ -3,10 +3,36 @@ import csv
 import io
 from utils import csv_safe_cell
 from provider_policy import policy_for
+from lead_summary import qualify, lead_row, filter_sort
 
 SCORE_FIELDS = ("opportunity_score", "digital_gap", "business_strength", "evidence_confidence", "contact_confidence")
 DETECTOR_FIELDS = ("contact_form", "quote_form", "booking_form", "booking_widget", "chat_widget", "primary_cta", "click_to_call", "request_quote_cta", "booking_cta", "contact_cta", "facebook", "instagram", "linkedin", "youtube", "cms")
 CSV_FIELDS = ("business_name", "provider", "provider_record_id", "category", "city", "state", "website", "emails", "phones", "email_source_urls", "phone_source_urls", "profile", *SCORE_FIELDS, *DETECTOR_FIELDS, "audit_status", "observed_at")
+
+
+def qualification_detail(store, bid, user, job_id=None):
+    detail = store.detail(bid, user, job_id=job_id)
+    if detail is None:
+        return None
+    # The development store's identity may originate with a provider. Keep its
+    # existing Google suppression policy when exposing the shared summary.
+    if any(s.get('provider') == 'google_places_new' for s in detail['sources']):
+        detail['business'] = dict(detail['business'], canonical_name='Unverified business', website_url=None, city=None, state=None)
+    if job_id:
+        job = store.job(job_id, user)
+        detail['business'].update({k: job.get(k) for k in ('category', 'city', 'state')})
+    detail['summary'] = qualify(detail)
+    return detail
+
+
+def qualification_leads(store, user, limit=50, offset=0, job_id=None, **filters):
+    jobs = store.list_jobs(user)
+    job = store.job(job_id, user) if job_id else next(iter(jobs), None)
+    if not job:
+        return dict(leads=[], total=0, job=None)
+    ids = list(dict.fromkeys(i['business_id'] for i in store.items(job['id'], user)))
+    rows = filter_sort([lead_row(qualification_detail(store, bid, user, job['id'])) for bid in ids], **filters)
+    return dict(leads=rows[offset:offset + limit], total=len(rows), job=dict(job, discovered_count=len(ids)))
 
 
 def summary(detail):

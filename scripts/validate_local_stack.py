@@ -169,12 +169,14 @@ def main():
 
     exported = c.get('/api/leads/export/csv')
     assert exported.status_code == 200
-    assert 'info@fixture-business.test' in exported.text and 'phase4a2-place-' in exported.text
-    assert 'fixture-business.test' in exported.text and 'browser' in exported.text
+    assert 'info@fixture-business.test' in exported.text and 'phase4a2-place-' not in exported.text
+    columns = next(csv.reader(io.StringIO(exported.text)))
+    assert 'evidence' not in columns and 'primary_opportunity' in columns
+    assert 'fixture-business.test' in exported.text and 'website_conversion_v2' in exported.text
     assert 'GOOGLE_SENTINEL_' not in exported.text and '4.918237' not in exported.text and '9182736' not in exported.text
     assert "'+15125550199" in exported.text  # Phone starts with +; spreadsheet injection guard.
     assert py("from production_views import safe_cell; assert all(safe_cell(v).startswith(chr(39)) for v in ['=SUM(1,2)', '+cmd', '-1+2', '@SUM(A1)', '  =x']); print('ok')") == 'ok'
-    record('csv_policy', 'Browser URL/phone/email/evidence/v2/confidence/provider ID/search context included; sentinels excluded; formula-safe')
+    record('csv_policy', 'Browser identity/URL/canonical contacts/v2/confidence/search context; raw evidence/provider payloads excluded; formula-safe')
 
     # Real worker, Redis and API restarts while a five-item job is in progress.
     jid = create(c, 5)
@@ -441,7 +443,7 @@ def ui_smoke():
         page.screenshot(path=str(LOCAL / 'production-evidence-desktop.png'), full_page=True)
         page.get_by_role('button', name='Close details').click()
         with page.expect_download() as download:
-            page.get_by_role('button', name='Export all businesses (CSV)').click()
+            page.get_by_role('button', name='Export this view (CSV)').click()
         data = Path(download.value.path()).read_text()
         assert 'GOOGLE_SENTINEL_' not in data and 'info@fixture-business.test' in data
         page.set_viewport_size({'width': 390, 'height': 844})

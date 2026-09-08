@@ -72,11 +72,66 @@ def test_results_use_requested_jobs_audit_and_context(mixed):
     audit=AuditRun(item_id=item.id,business_id=m.real.id,status='partial')
     m.db.add(audit);m.db.flush()
     m.db.add(LeadScore(audit_id=audit.id,business_id=m.real.id,profile_version='website_conversion_v2',score=90,breakdown={'opportunity_score':90}))
+    old_page = m.db.scalar(select(AuditPage).join(AuditRun).where(AuditRun.item_id == m.live_item.id))
+    old_page.data = {'page_type':'homepage','title':'Earlier observed name','final_url':'https://example.com/earlier'}
+    m.db.add(AuditPage(audit_id=audit.id,data={'page_type':'homepage','title':'New observed name','final_url':'https://example.com/new'}))
+    m.real.browser_observed_name = 'New observed name'
+    m.real.browser_observed_url = 'https://example.com/new'
     m.db.flush()
     old=leads_view(m.db,m.user.id,job_id=m.live_job.id)['leads'][0]
     new=leads_view(m.db,m.user.id,job_id=newer.id)['leads'][0]
     assert (old['city'],old['opportunity_score'],old['audit_status']) == ('Dallas',10,'completed')
     assert (new['city'],new['opportunity_score'],new['audit_status']) == ('Phoenix',90,'partial')
+    assert old['business_name'] == 'Earlier observed name' and old['website'] == 'https://example.com/earlier'
+    assert new['business_name'] == 'New observed name' and new['website'] == 'https://example.com/new'
+    assert leads_view(m.db,m.user.id)['job']['id'] == newer.id
+    assert leads_view(m.db,m.user.id)['leads'][0]['city'] == 'Phoenix'
+
+
+def test_latest_empty_live_search_does_not_fall_back_to_history(mixed):
+    from production_views import leads_view, export_csv, detail_view
+    m = mixed
+    newest = SearchJob(user_id=m.user.id,run_mode='live',payload={'category':'New search','city':'Austin','state':'TX'})
+    m.db.add(newest); m.db.flush()
+    assert leads_view(m.db,m.user.id)['job']['id'] == newest.id
+    assert leads_view(m.db,m.user.id)['total'] == 0
+    assert len(export_csv(m.db,m.user.id).splitlines()) == 1
+    assert leads_view(m.db,m.user.id,job_id=m.live_job.id)['total'] == 1
+    assert detail_view(m.db,m.real,m.user.id,job_id=newest.id) is None
+    assert detail_view(m.db,m.real,m.user.id,job_id=m.test_job.id) is None
+    assert leads_view(m.db,'different-owner',job_id=m.live_job.id)['total'] == 0
+
+
+def test_offline_defaults_to_its_own_latest_search(mixed, monkeypatch):
+    from production_views import leads_view
+    monkeypatch.setenv('LOCAL_RUN_MODE','offline_test')
+    result = leads_view(mixed.db,mixed.user.id)
+    assert result['job']['id'] == mixed.test_job.id
+    assert [r['id'] for r in result['leads']] == [mixed.fixture.id]
+
+
+def test_batch_projection_and_csv_do_not_mutate_evidence_or_scores(mixed):
+    from sqlalchemy import event
+    from production_views import leads_view, export_csv
+    m = mixed
+    before = {model: [(r.id, repr(getattr(r, 'evidence', getattr(r, 'breakdown', getattr(r, 'data', None))))) for r in m.db.scalars(select(model))]
+              for model in (AuditEvidence,LeadScore,BusinessContact,AuditPage)}
+    statements = []
+    def record(*args): statements.append(args[2])
+    bind = m.db.get_bind(); event.listen(bind, 'before_cursor_execute', record)
+    try:
+        result = leads_view(m.db,m.user.id)
+        assert len(statements) <= 8
+    finally:
+        event.remove(bind, 'before_cursor_execute', record)
+    assert result['total'] == 1
+    assert 'evidence' not in export_csv(m.db,m.user.id).splitlines()[0].split(',')
+    assert leads_view(m.db,m.user.id,audit_status='failed')['total'] == 0
+    assert leads_view(m.db,m.user.id,has_phone=True)['total'] == 0
+    m.db.flush()
+    after = {model: [(r.id, repr(getattr(r, 'evidence', getattr(r, 'breakdown', getattr(r, 'data', None))))) for r in m.db.scalars(select(model))]
+             for model in before}
+    assert before == after
 
 
 def test_fixture_cleanup_dryrun_confirm_and_preservation(mixed):

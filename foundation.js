@@ -41,6 +41,7 @@ async function api(path, options = {}) {
 
 function clearSession() {
   pollGeneration++;
+  resetQualification();
   token = '';
   currentUser = '';
   csrfToken = '';
@@ -79,45 +80,6 @@ async function loadStats() {
   for (const [id, key] of [['s-total', 'total'], ['s-email', 'with_email'], ['s-website', 'with_website'], ['s-jobs', 'active_jobs']]) {
     $(id).textContent = data[key];
   }
-}
-
-function websiteCell(value) {
-  const cell = textElement('td', value);
-  if (typeof value !== 'string' || /[\u0000-\u0020\u007f\\]/.test(value)) return cell;
-  try {
-    const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) return cell;
-    const link = textElement('a', value);
-    link.href = url.href;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    cell.replaceChildren(link);
-  } catch { /* Malformed and scheme-less URLs remain plain text. */ }
-  return cell;
-}
-
-function renderLeads(data) {
-  const rows = [];
-  for (const lead of data.leads) {
-    const row = document.createElement('tr');
-    const detailButton = textElement('button', 'View evidence');
-    detailButton.type = 'button'; detailButton.className = 'btn btn-outline';
-    detailButton.addEventListener('click', () => showDetail(lead.id).catch(showError));
-    const detailCell = document.createElement('td'); detailCell.append(detailButton);
-    row.append(textElement('td', lead.business_name), textElement('td', [lead.city, lead.state].filter(Boolean).join(', ')),
-      websiteCell(lead.website), textElement('td', lead.opportunity_score), textElement('td', lead.digital_gap),
-      textElement('td', lead.evidence_confidence), textElement('td', lead.contact_confidence),
-      textElement('td', friendly(lead.primary_opportunity)), textElement('td', lead.audit_status), detailCell);
-    rows.push(row);
-  }
-  $('lead-rows').replaceChildren(...rows);
-  $('lead-count').textContent = `${data.total} businesses · ${offset + (data.leads.length ? 1 : 0)}–${offset + data.leads.length} shown`;
-  $('previous-page').disabled = offset === 0;
-  $('next-page').disabled = offset + data.leads.length >= data.total;
-}
-
-async function loadLeads() {
-  renderLeads(await (await api(`/api/leads?limit=50&offset=${offset}`)).json());
 }
 
 function clearValidation() {
@@ -201,57 +163,6 @@ function statusBadge(value) {
   const allowed = ['present', 'absent', 'unknown', 'blocked', 'failed', 'not_applicable'];
   const status = allowed.includes(value) ? value : 'unknown';
   const span = textElement('span', friendly(status)); span.className = 'evidence-status status-' + status; return span;
-}
-
-async function showDetail(bid) {
-  const sessionUser = currentUser;
-  const detail = await (await api(`/api/businesses/${encodeURIComponent(bid)}`)).json();
-  if (!signedIn || currentUser !== sessionUser) return;
-  const business = detail.business, score = detail.score;
-  $('detail-title').textContent = business.canonical_name;
-  const nodes = [textElement('p', [business.category, business.city, business.state, business.address].filter(Boolean).join(' · ')),
-    textElement('p', `Audit: ${detail.audit?.status || 'pending'} · Observed: ${detail.audit?.finished_at || 'not yet'} · ${detail.audit?.error_message || ''}`)];
-  nodes.push(textElement('h3', 'Sources and website'));
-  const sources = document.createElement('ul');
-  for (const source of detail.sources) {
-    const item = textElement('li', `${source.provider} · ${source.provider_record_id} · ${source.source_url || 'No source URL'} · ${source.observed_at}`); sources.append(item);
-  }
-  nodes.push(sources, textElement('p', business.website_url || 'No authoritative website supplied.'));
-  nodes.push(textElement('h3', 'Scores and confidence'));
-  if (score) {
-    const scores = document.createElement('dl'); scores.className = 'score-grid';
-    for (const key of ['opportunity_score', 'digital_gap', 'business_strength', 'evidence_confidence', 'contact_confidence']) {
-      scores.append(textElement('dt', friendly(key)), textElement('dd', score[key] == null ? 'Unknown' : `${score[key]} / 100`));
-    }
-    nodes.push(scores, textElement('p', `${score.profile_version}: ${score.breakdown.formula}. ${score.breakdown.fallback ? 'Fallback: ' + friendly(score.breakdown.fallback) + '.' : ''}`));
-    nodes.push(textElement('p', 'Unknown, blocked and failed checks do not count as missing features. Absence refers only to the pages assessed. Mobile layout is a Firefox overflow check.'));
-  } else nodes.push(textElement('p', 'Scoring has not finished.'));
-  nodes.push(textElement('h3', 'Public business contacts'));
-  const contacts = document.createElement('ul');
-  for (const c of detail.contacts) contacts.append(textElement('li', `${c.normalized_value} · ${friendly(c.evidence_type)} · ${Math.round(c.confidence * 100)}% confidence · ${c.source_url || 'Provider source unavailable'} · ${c.excerpt || ''}`));
-  if (!detail.contacts.length) contacts.append(textElement('li', 'No public contacts observed. No contacts were guessed.'));
-  nodes.push(contacts, textElement('h3', 'Pages inspected'));
-  const pageList = document.createElement('ul');
-  for (const page of detail.pages) pageList.append(textElement('li', `${page.page_type}: ${page.status} · ${page.final_url || page.url} · ${page.title || ''} · ${page.navigation_ms ?? 'unknown'} ms navigation (diagnostic only)`));
-  nodes.push(pageList, textElement('h3', 'Evidence and score explanation'));
-  const evidenceList = document.createElement('div'); evidenceList.className = 'evidence-list';
-  const findingMap = score?.breakdown?.findings || {};
-  for (const [key, finding] of Object.entries(findingMap)) {
-    const section = document.createElement('section'); section.className = 'evidence-card';
-    const heading = textElement('h4', friendly(key)); heading.append(' ', statusBadge(finding.status)); section.append(heading);
-    const component = (score.breakdown.components || []).find(c => c.detector_key === key);
-    if (component) section.append(textElement('p', `Scoring status: ${friendly(component.status)} · Weight ${component.weight} · Gap points: ${component.gap_points ?? 'excluded'}`));
-    for (const e of detail.evidence.filter(e => e.detector_key === key)) {
-      section.append(textElement('p', `${friendly(e.status)} · ${e.value == null ? 'No measured value' : typeof e.value === 'object' ? JSON.stringify(e.value) : e.value}`),
-        textElement('p', `${e.source_url || 'No page loaded'} · ${e.page_type || 'audit'} · ${e.observed_at}`),
-        textElement('p', `${Math.round(e.confidence * 100)}% confidence · ${e.detector_version} · ${e.locator || 'No locator'}`));
-      if (e.excerpt) section.append(textElement('blockquote', e.excerpt));
-    }
-    evidenceList.append(section);
-  }
-  nodes.push(evidenceList, textElement('p', `${detail.history.length} audit run(s) retained for this business.`));
-  $('detail-content').replaceChildren(...nodes);
-  $('business-detail').showModal(); $('close-detail').focus();
 }
 
 $('close-detail').addEventListener('click', () => $('business-detail').close());
@@ -340,6 +251,7 @@ $('leadgen-form').addEventListener('submit', async event => {
   $('lg-btn').disabled = true;
   try {
     const data = await (await api('/api/leadgen/start', {method: 'POST', body: JSON.stringify(body)})).json();
+    selectedSearch = ''; offset = 0;
     void pollJob(data.job_id);
   } catch (error) {
     $('lg-btn').disabled = false;
@@ -349,7 +261,7 @@ $('leadgen-form').addEventListener('submit', async event => {
 $('export-leads').addEventListener('click', async () => {
   try {
     // One CSV implementation, on the server. No browser-side cell serialization.
-    const blob = await (await api('/api/leads/export/csv')).blob();
+    const blob = await (await api('/api/leads/export/csv?' + displayedQuery)).blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a'); link.href = url; link.download = 'leads.csv';
     document.body.append(link); link.click(); link.remove();
@@ -396,4 +308,5 @@ async function initializeAuthentication() {
     catch (error) { clearSession(); if (error.status !== 401) $('login-error').textContent = error.message; }
   }
 }
+initializeQualification();
 initializeAuthentication().catch(error => { $('login-error').textContent = error.message; });

@@ -29,7 +29,9 @@ from jobs import JobManager, CapacityExceeded
 from engine_store import EngineStore
 from engine_config import EngineConfig
 from engine_worker import PersistentWorker
-from engine_views import summary as business_summary, csv_export
+from engine_views import qualification_leads, qualification_detail
+from lead_summary import summary_csv
+from qualification_params import qualification_params
 from dataclasses import asdict
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -404,6 +406,11 @@ async def serve_foundation_js():
     return FileResponse(Path(__file__).parent / "foundation.js", media_type="text/javascript")
 
 
+@app.get('/qualification.js')
+async def serve_qualification_js():
+    return FileResponse(Path(__file__).parent / 'qualification.js', media_type='text/javascript')
+
+
 @app.get("/base_style.css")
 async def serve_base_css():
     return FileResponse(Path(__file__).parent / "base_style.css", media_type="text/css")
@@ -516,9 +523,10 @@ async def api_lead_batches(user: str = Depends(get_current_user)):
 # ── Leads ──
 @app.get("/api/leads")
 async def api_leads(limit: int = Query(100, ge=1, le=100), offset: int = Query(0, ge=0),
-                    user: str = Depends(get_current_user)):
-    ids, total = engine_store.result_ids(user, limit, offset)
-    return {"leads": [business_summary(engine_store.detail(bid, user)) for bid in ids], "total": total}
+                    filters=Depends(qualification_params), user: str = Depends(get_current_user)):
+    if filters['job_id'] and not engine_store.job(filters['job_id'], user):
+        raise HTTPException(404, 'Job not found')
+    return qualification_leads(engine_store, user, limit, offset, **filters)
 
 
 @app.get("/api/leads/filters")
@@ -661,8 +669,8 @@ async def api_browser_health(user: str = Depends(get_current_user)):
 
 
 @app.get("/api/businesses/{bid}")
-async def api_business_detail(bid: str, user: str = Depends(get_current_user)):
-    detail = engine_store.detail(bid, user)
+async def api_business_detail(bid: str, job_id: str | None = None, user: str = Depends(get_current_user)):
+    detail = qualification_detail(engine_store, bid, user, job_id)
     if detail is None:
         raise HTTPException(404, "Business not found")
     return detail
@@ -1220,8 +1228,11 @@ async def search_leads(request: Request, q: str, limit: int = 50, _=Depends(get_
 
 
 @app.get("/api/leads/export/csv")
-async def export_leads_csv(user: str = Depends(get_current_user)):
-    return StreamingResponse(csv_export(engine_store, user), media_type="text/csv; charset=utf-8",
+async def export_leads_csv(filters=Depends(qualification_params), user: str = Depends(get_current_user)):
+    if filters['job_id'] and not engine_store.job(filters['job_id'], user):
+        raise HTTPException(404, 'Job not found')
+    data = summary_csv(qualification_leads(engine_store, user, limit=100, **filters)['leads'])
+    return StreamingResponse(iter([data]), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": 'attachment; filename="lead-engine-businesses.csv"'})
 
 

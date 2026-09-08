@@ -6,6 +6,7 @@
   <title>Local Business Lead Intelligence Engine</title>
   <link rel="stylesheet" href="/base_style.css">
   <link rel="stylesheet" href="/new_style.css">
+  <script src="/qualification.js" defer></script>
   <script src="/foundation.js" defer></script>
 </head>
 <body>
@@ -69,9 +70,19 @@
       </section>
       <section class="section" id="page-leads" aria-labelledby="leads-title">
         <h2 id="leads-title">Leads</h2>
-        <p>Review the latest evidence from your searches. Confidence describes observation quality; it is separate from opportunity. Legacy records remain preserved in the database.</p>
-        <div class="toolbar"><button type="button" class="btn btn-outline" id="refresh-leads">Refresh</button><button type="button" class="btn btn-outline" id="export-leads">Export all businesses (CSV)</button><span id="lead-count" role="status"></span></div>
-        <div class="table-scroll" tabindex="0" role="region" aria-label="Business results"><table><caption>Saved businesses</caption><thead><tr><th scope="col">Business</th><th scope="col">Location</th><th scope="col">Website</th><th scope="col">Opportunity</th><th scope="col">Digital gap</th><th scope="col">Evidence confidence</th><th scope="col">Contact confidence</th><th scope="col">Primary opportunity</th><th scope="col">Audit status</th><th scope="col">Details</th></tr></thead><tbody id="lead-rows"></tbody></table></div>
+        <p>Find a public contact path, review confirmed conversion gaps, and see how much of each website was assessed.</p>
+        <div class="search-context"><label for="search-selector">Search results</label><select id="search-selector"><option value="">Latest search (automatic)</option></select><p id="current-search" role="status"></p></div>
+        <form id="lead-filters" class="lead-filters">
+          <div><label for="filter-audit">Audit status</label><select id="filter-audit"><option value="">All statuses</option><option value="completed">Completed</option><option value="partial">Partial</option><option value="failed">Failed</option><option value="blocked">Blocked</option><option value="unverified">Not verified</option></select></div>
+          <div><label for="filter-opportunity">Primary opportunity</label><select id="filter-opportunity"><option value="">All opportunities</option><option>Quote / Estimate Conversion</option><option>Online Booking</option><option>Contact Conversion</option><option>Click-to-Call</option><option>CTA Improvement</option><option>Mobile Conversion</option><option>Website Performance</option><option>No Strong Gap Confirmed</option><option>Insufficient Evidence</option></select></div>
+          <div><label for="filter-evidence">Evidence confidence</label><select id="filter-evidence"><option value="0">Any confidence</option><option value="40">40+ / 100</option><option value="70">70+ / 100</option><option value="85">85+ / 100</option></select></div>
+          <div><label for="filter-score">Minimum opportunity</label><input id="filter-score" type="number" min="0" max="100" step="any" placeholder="Any score"></div>
+          <div><label for="sort-leads">Sort by</label><select id="sort-leads"><option value="useful">Useful leads first</option><option value="opportunity">Opportunity: high to low</option><option value="evidence">Evidence: high to low</option><option value="contact">Contact: high to low</option><option value="business">Business name</option><option value="audit">Audit status</option></select></div>
+          <fieldset class="contact-filters"><legend>Public contact</legend><label><input type="checkbox" id="filter-phone"> Has phone</label><label><input type="checkbox" id="filter-email"> Has email</label><label><input type="checkbox" id="filter-contact"> Has actionable path</label></fieldset>
+          <div class="filter-actions"><button type="submit" class="btn btn-primary">Apply filters</button><button type="button" class="btn btn-outline" id="clear-lead-filters">Clear filters</button></div>
+        </form>
+        <div class="toolbar"><button type="button" class="btn btn-outline" id="refresh-leads">Refresh</button><button type="button" class="btn btn-outline" id="export-leads">Export this view (CSV)</button><span id="lead-count" role="status"></span></div>
+        <div id="lead-results" class="table-scroll" tabindex="0" role="region" aria-label="Business results"><table class="qualification-table"><caption>Website conversion opportunities · Search location shown</caption><thead><tr><th scope="col">Business</th><th scope="col">Location</th><th scope="col">Website</th><th scope="col">Primary opportunity</th><th scope="col">Opportunity</th><th scope="col">Evidence</th><th scope="col">Contact</th><th scope="col">Audit status</th><th scope="col">Details</th></tr></thead><tbody id="lead-rows"></tbody></table><p id="lead-empty" hidden></p></div>
         <div class="toolbar"><button type="button" class="btn btn-outline" id="previous-page">Previous</button><button type="button" class="btn btn-outline" id="next-page">Next</button></div>
       </section>
       <section class="section" id="page-settings" aria-labelledby="settings-title">

@@ -288,14 +288,16 @@ class EngineStore:
             total = conn.execute("SELECT count(DISTINCT i.business_id) FROM search_job_items i JOIN search_jobs j ON j.id=i.job_id WHERE j.user_id=?", (user,)).fetchone()[0]
         return [r[0] for r in rows], total
 
-    def detail(self, bid, user):
+    def detail(self, bid, user, job_id=None):
         with self.transaction() as conn:
-            if not conn.execute("SELECT 1 FROM search_job_items i JOIN search_jobs j ON j.id=i.job_id WHERE i.business_id=? AND j.user_id=?", (bid, user)).fetchone():
+            scope = " AND j.id=?" if job_id else ""
+            params = (bid, user, job_id) if job_id else (bid, user)
+            if not conn.execute("SELECT 1 FROM search_job_items i JOIN search_jobs j ON j.id=i.job_id WHERE i.business_id=? AND j.user_id=?" + scope, params).fetchone():
                 return None
             business = dict(conn.execute("SELECT * FROM businesses WHERE id=?", (bid,)).fetchone())
             business.pop("identity_key", None)
             sources = [dict(r) for r in conn.execute("SELECT provider,provider_record_id,source_url,observed_at FROM business_sources WHERE business_id=?", (bid,))]
-            runs = [dict(r) for r in conn.execute("SELECT r.id,r.provider,r.provider_version,r.status,r.start_url,r.final_url,r.pages_attempted,r.pages_completed,r.error_code,r.error_message,r.started_at,r.finished_at FROM audit_runs r JOIN search_job_items i ON i.id=r.job_item_id JOIN search_jobs j ON j.id=i.job_id WHERE r.business_id=? AND j.user_id=? ORDER BY r.started_at DESC,r.id DESC LIMIT 100", (bid, user))]
+            runs = [dict(r) for r in conn.execute("SELECT r.id,r.provider,r.provider_version,r.status,r.start_url,r.final_url,r.pages_attempted,r.pages_completed,r.error_code,r.error_message,r.started_at,r.finished_at FROM audit_runs r JOIN search_job_items i ON i.id=r.job_item_id JOIN search_jobs j ON j.id=i.job_id WHERE r.business_id=? AND j.user_id=?" + scope + " ORDER BY r.started_at DESC,r.id DESC LIMIT 100", params)]
             run = runs[0] if runs else None
             result = {"business": business, "sources": sources, "audit": run, "history": runs, "pages": [], "evidence": [], "contacts": [], "score": None}
             if run:

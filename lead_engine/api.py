@@ -22,6 +22,7 @@ from production_config import validate_production_config
 from production_logging import configure_logging
 from production_repository import event
 from production_views import job_view, detail_view, leads_view, export_csv
+from qualification_params import qualification_params
 from auth_sessions import fingerprint
 from health import liveness, readiness
 from redis_coordination import login_attempt, wake_worker
@@ -218,23 +219,30 @@ def results(jid: str, auth=Depends(authenticated)):
         return leads_view(db, auth[0].id, limit=100, job_id=jid)
 
 @app.get('/api/leads/export/csv')
-def csv_route(auth=Depends(authenticated)):
+def csv_route(filters=Depends(qualification_params), auth=Depends(authenticated)):
     with transaction() as db:
-        return Response(export_csv(db, auth[0].id), media_type='text/csv',
+        if filters['job_id']:
+            owned_job(db, filters['job_id'], auth[0].id)
+        return Response(export_csv(db, auth[0].id, **filters), media_type='text/csv',
                         headers={'Content-Disposition': 'attachment; filename=leads.csv'})
 
 @app.get('/api/leads')
-def leads(limit: int = 50, offset: int = 0, auth=Depends(authenticated)):
+def leads(limit: int = 50, offset: int = 0, filters=Depends(qualification_params), auth=Depends(authenticated)):
     with transaction() as db:
-        return leads_view(db, auth[0].id, max(1, min(limit, 100)), max(0, offset))
+        if filters['job_id']:
+            owned_job(db, filters['job_id'], auth[0].id)
+        return leads_view(db, auth[0].id, max(1, min(limit, 100)), max(0, offset), **filters)
 
 @app.get('/api/businesses/{bid}')
-def business_detail(bid: str, auth=Depends(authenticated)):
+def business_detail(bid: str, job_id: str | None = None, auth=Depends(authenticated)):
     with transaction() as db:
         b = db.scalar(select(Business).where(Business.id == bid, visible_business()))
         if not b or b.user_id != auth[0].id:
             raise HTTPException(404, 'Business not found')
-        return detail_view(db, b, auth[0].id)
+        detail = detail_view(db, b, auth[0].id, job_id=job_id)
+        if detail is None:
+            raise HTTPException(404, 'Business not found in this search')
+        return detail
 
 @app.get('/api/stats')
 def stats(auth=Depends(authenticated)):
@@ -276,6 +284,6 @@ def home():
 
 @app.get('/{asset}')
 def static_asset(asset: str):
-    if asset not in {'foundation.js', 'base_style.css', 'new_style.css'}:
+    if asset not in {'foundation.js', 'qualification.js', 'base_style.css', 'new_style.css'}:
         raise HTTPException(404, 'Not found')
     return FileResponse(asset)

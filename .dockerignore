@@ -9,6 +9,7 @@ camofox-browser
 audit_artifacts
 *.dump
 *.backup
+*.csv
 *.log
 .pytest_cache
 .camofox

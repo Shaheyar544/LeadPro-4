@@ -192,14 +192,15 @@ class RouteTests(unittest.TestCase):
         from audit_engine.scoring import score_audit
         result = dict(status="completed", pages=[], evidence=[], contacts=[
             dict(type="email", display="@formula", normalized="@formula", source_url="https://business.test/", evidence_type="fixture", confidence=0.5),
-            dict(type="phone", display="+15551234567", normalized="+15551234567", source_url="https://business.test/", evidence_type="fixture", confidence=0.5)])
+            dict(type="phone", display="+15125551234", normalized="+15125551234", source_url="https://business.test/", evidence_type="tel", confidence=0.98)])
         store.finish_run(job["id"], item, "fixture", rid, result, score_audit(business(), result))
         response = self.client.get("/api/leads/export/csv", headers=self.headers)
         row = list(csv.DictReader(io.StringIO(response.text)))[0]
         self.assertTrue(row["business_name"].startswith("'="))
-        self.assertEqual(row["emails"], "'@formula")
-        self.assertEqual(row["phones"], "'+15551234567")
-        self.assertEqual(row["city"], 'Austin, "TX"')
+        self.assertEqual(row["primary_email"], '')  # Rejected contact is not promoted into the summary.
+        self.assertEqual(row["primary_phone"], "'+15125551234")
+        self.assertEqual(row["location"], 'Austin, TX')  # Selected search context, not provider address.
+        self.assertNotIn('evidence', row)
         self.assertNotIn("decision_maker", row)
 
     def test_security_headers_static_assets_and_no_inline_js(self):
@@ -208,9 +209,9 @@ class RouteTests(unittest.TestCase):
         self.assertIn("script-src 'self'", response.headers["Content-Security-Policy"])
         self.assertNotIn("onclick=", response.text)
         self.assertNotIn("EventSource", response.text)
-        for path in ("/foundation.js", "/base_style.css", "/new_style.css"):
+        for path in ("/foundation.js", "/qualification.js", "/base_style.css", "/new_style.css"):
             self.assertEqual(self.client.get(path).status_code, 200)
-        script = self.client.get("/foundation.js").text
+        script = self.client.get("/foundation.js").text + self.client.get('/qualification.js').text
         self.assertNotIn("innerHTML", script)
         self.assertNotIn("insertAdjacentHTML", script)
 
