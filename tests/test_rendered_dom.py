@@ -73,3 +73,46 @@ class DOMFixtureTests(unittest.TestCase):
                 self.assertEqual(page.evaluate(EXTRACT)["soft_error"], expected)
             finally:
                 page.close()
+
+    def test_shared_seo_dom_extraction_and_policy_boundary(self):
+        import json
+        from audit_engine.growth import page_observation
+        schema = {'@context':'https://schema.org','@type':'Plumber','name':'Oak Plumbing','url':'https://business.test/',
+                  'address':{'streetAddress':'12 Oak Street','addressLocality':'Austin','addressRegion':'TX'},
+                  'aggregateRating':{'ratingValue':'GOOGLE_RATING_CANARY'}, 'review':{'reviewBody':'GOOGLE_REVIEW_CANARY'}}
+        html = '''<html><head><title>Oak Plumbing Austin</title><meta name="description" content="Plumbing repairs in Austin">
+          <meta name="viewport" content="width=device-width"><meta name="robots" content="noindex,nofollow">
+          <link rel="canonical" href="https://business.test/"></head><body><main>
+          <h1>Oak Plumbing Austin</h1><h3>Repair services</h3><p>Oak plumbing repairs include clear inspections and practical repair options for homes in Austin, TX.</p>
+          <address>12 Oak Street Austin, TX</address><a href="https://business.test/services/repair">Repair service</a>
+          <img src="data:," width="20" height="20"><img src="data:," width="20" height="20" alt="">
+          <script type="application/ld+json">''' + json.dumps(schema) + '''</script>
+          <script type="application/ld+json">{invalid json}</script></main></body></html>'''
+        page = self.context.new_page()
+        try:
+            page.set_content(html)
+            f = page.evaluate(EXTRACT); f['url'] = 'https://business.test/'
+            raw = f['growth']
+            assert raw['canonicals'] == ['https://business.test/']
+            assert raw['images']['missing_alt'] == raw['images']['empty_alt'] == 1
+            assert raw['schema']['invalid_json_count'] == 1
+            assert 'Austin, TX' in raw['visible_location_context']
+            assert len(raw['visible_location_context']) <= 20
+            assert 'GOOGLE_RATING_CANARY' not in json.dumps(raw)
+            assert 'GOOGLE_REVIEW_CANARY' not in json.dumps(raw)
+            o, rows = page_observation(f, dict(id='dom', final_url=f['url']))
+            assert o['schema']['local_business']
+            assert o['heading_hierarchy_skip']
+            assert next(r for r in rows if r['detector_key'] == 'growth.indexability')['status'] == 'absent'
+            # A type beyond a bounded graph/microdata sample must not become
+            # a confident absence of LocalBusiness markup.
+            graph = {'@graph':[{'@type':'Thing'}] * 100 + [{'@type':'LocalBusiness'}]}
+            page.set_content('<script type="application/ld+json">' + json.dumps(graph) + '</script><main><h1>Business</h1></main>')
+            bounded = page.evaluate(EXTRACT); bounded['url'] = 'https://business.test/'
+            assert not bounded['growth']['schema']['complete']
+            _, bounded_rows = page_observation(bounded, dict(id='bounded',final_url=bounded['url']))
+            assert next(r for r in bounded_rows if r['detector_key']=='growth.local_schema')['status'] == 'unknown'
+            page.set_content('<div itemscope itemtype="https://schema.org/Thing"></div>' * 61)
+            assert not page.evaluate(EXTRACT)['growth']['schema']['complete']
+        finally:
+            page.close()

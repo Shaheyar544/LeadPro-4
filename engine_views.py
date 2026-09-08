@@ -4,6 +4,7 @@ import io
 from utils import csv_safe_cell
 from provider_policy import policy_for
 from lead_summary import qualify, lead_row, filter_sort
+from growth_scoring import growth_for_detail
 
 SCORE_FIELDS = ("opportunity_score", "digital_gap", "business_strength", "evidence_confidence", "contact_confidence")
 DETECTOR_FIELDS = ("contact_form", "quote_form", "booking_form", "booking_widget", "chat_widget", "primary_cta", "click_to_call", "request_quote_cta", "booking_cta", "contact_cta", "facebook", "instagram", "linkedin", "youtube", "cms")
@@ -21,6 +22,7 @@ def qualification_detail(store, bid, user, job_id=None):
     if job_id:
         job = store.job(job_id, user)
         detail['business'].update({k: job.get(k) for k in ('category', 'city', 'state')})
+    detail['digital_growth'] = growth_for_detail(detail)
     detail['summary'] = qualify(detail)
     return detail
 

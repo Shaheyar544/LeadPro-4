@@ -105,7 +105,12 @@ class ProductionRepository:
 
     def save_audit(self, job_id, token, item_id, audit):
         """Only the BrowserProvider/AuditEngine result enters this boundary."""
-        score = score_browser_evidence(audit)
+        score = score_browser_evidence(audit.get('conversion_view', audit))
+        if audit.get('growth_assessed'):
+            from growth_scoring import build_growth, stored_growth
+            score['digital_growth'] = stored_growth(build_growth(audit['evidence'], score, assessed=True,
+                observations=audit.get('growth_observations', []), page_analysis=audit.get('growth_page_analysis', []),
+                metrics=audit.get('growth_metrics')))
         with transaction() as db:
             job = self.owned(db, job_id, token)
             item = db.get(SearchJobItem, item_id)
@@ -140,7 +145,7 @@ class ProductionRepository:
             for evidence in audit['evidence']:
                 if evidence.get('page_id') not in page_ids:
                     continue
-                data = {k: v for k, v in evidence.items() if k in ('detector_key', 'status', 'value', 'source_url', 'page_type', 'excerpt', 'locator', 'confidence', 'detector_version', 'observed_at')}
+                data = {k: v for k, v in evidence.items() if k in ('id', 'detector_key', 'status', 'value', 'source_url', 'page_type', 'excerpt', 'locator', 'confidence', 'detector_version', 'observed_at')}
                 db.add(AuditEvidence(audit_id=run.id, page_id=evidence['page_id'], business_id=business.id, evidence=data))
             seen = set()
             for contact in audit['contacts']:

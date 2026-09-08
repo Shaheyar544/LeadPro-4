@@ -73,10 +73,10 @@ async def process_job(repo, job, real_browser, leases, guard):
         validate_mode()
         offline = run_mode() == 'offline_test'
         if offline:
-            from .offline import OfflineGoogle, browser_fixture, validate_fixture
+            from .offline import OfflineGoogle, browser_fixture, validate_fixture, fixture_resources
             source = OfflineGoogle()
             browser = browser_fixture()
-            runner = AuditEngine(browser, EngineConfig(settle_ms=0, readiness_ms=500), validate=validate_fixture)
+            runner = AuditEngine(browser, EngineConfig(settle_ms=0, readiness_ms=500), validate=validate_fixture, resources_factory=fixture_resources)
         else:
             source = ProviderDiscovery('google_places_new', os.getenv('GOOGLE_PLACES_NEW_API_KEY', ''))
             runner = AuditEngine(browser, EngineConfig())

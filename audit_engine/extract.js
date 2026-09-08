@@ -63,13 +63,86 @@
     .map(el => clean(el.src || el.href, 350));
   // Match signatures in inline scripts without returning their source or contact strings.
   const inline = [...document.scripts].filter(el => !el.src).slice(0, 100).map(el => el.textContent.slice(0, 30000)).join('\n');
+  // Shared Digital Growth facts. Never return raw JSON-LD, ratings, reviews,
+  // third-party widget text, script contents or an entire page text dump.
+  const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(visible);
+  const images = [...document.images].filter(visible);
+  const schemas = []; let schemaInvalid = 0, schemaLimited = false, schemaNodes = 0, schemaBytes = 0;
+  const scalar = value => typeof value === 'string' || typeof value === 'number' ? clean(value, 160) : '';
+  const visitSchema = (value, depth = 0) => {
+    if (depth > 10 || ++schemaNodes > 600) { schemaLimited = true; return; }
+    if (Array.isArray(value)) { if (value.length > 100) schemaLimited = true; value.slice(0, 100).forEach(v => visitSchema(v, depth + 1)); return; }
+    if (!value || typeof value !== 'object') return;
+    if (value['@type']) {
+      const types = (Array.isArray(value['@type']) ? value['@type'] : [value['@type']])
+        .filter(t => typeof t === 'string').slice(0, 8).map(t => clean(t, 120).replace(/^https?:\/\/schema.org\//, ''));
+      const address = value.address && typeof value.address === 'object' && !Array.isArray(value.address) ? value.address : {};
+      schemas.push({types, name: scalar(value.name), url: scalar(value.url), id: scalar(value['@id']),
+        phone: scalar(value.telephone), address: Object.fromEntries(['streetAddress','addressLocality','addressRegion','postalCode','addressCountry']
+          .map(k => [k, scalar(address[k])]).filter(([, v]) => v)),
+        geo_present: !!(value.geo?.latitude && value.geo?.longitude), hours_present: !!(value.openingHours || value.openingHoursSpecification),
+        areas: (Array.isArray(value.areaServed) ? value.areaServed : [value.areaServed]).slice(0, 12)
+          .map(a => scalar(typeof a === 'object' && a ? a.name : a)).filter(Boolean)});
+    }
+    // Whitelisted entity relationships only; never walk reviews, ratings, offers or arbitrary payloads.
+    for (const key of ['@graph', 'mainEntity', 'department', 'subOrganization', 'location', 'publisher', 'provider'])
+      if (value[key]) visitSchema(value[key], depth + 1);
+  };
+  const ld = [...document.querySelectorAll('script[type="application/ld+json"]')];
+  for (const script of ld.slice(0, 24)) {
+    schemaBytes += script.textContent.length;
+    if (schemaBytes > 128000 || script.textContent.length > 64000) { schemaLimited = true; continue; }
+    try { visitSchema(JSON.parse(script.textContent)); } catch { schemaInvalid++; }
+  }
+  if (ld.length > 24) schemaLimited = true;
+  const microdataElements = [...document.querySelectorAll('[itemscope][itemtype]')];
+  if (microdataElements.length > 60) schemaLimited = true;
+  const microdata = microdataElements.slice(0, 60)
+    .flatMap(el => el.getAttribute('itemtype').split(/\s+/).filter(t => /^https?:\/\/schema.org\/\w+$/.test(t)).map(t => t.split('/').pop()));
+  const htexts = headings.slice(0, 60).map(el => ({level: Number(el.tagName[1]), text: clean(el.innerText, 160)}));
+  const paragraphs = [...document.querySelectorAll('main p,article p,section p')].filter(visible);
+  const addresses = [...document.querySelectorAll('address,[itemprop="streetAddress"]')].filter(visible).slice(0, 12).map(el => clean(el.innerText, 240));
+  const localityMatches = [...bodyText.matchAll(/\b([A-Z][a-z]+(?:[ -][A-Z][a-z]+){0,3}),\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/g)]
+    .slice(0, 20).map(m => clean(m[0], 100));
+  const seoLinks = anchors.slice(0, 250).map(el => ({href: clean(el.href, 2048), text: clean(el.innerText, 120),
+    navigation: !!el.closest('nav,header'), service_context: /services?|what we do/i.test(el.closest('section,article,nav')?.querySelector('h1,h2,h3,h4')?.innerText || '')}));
+  const growth = {
+    version: 'digital_growth_crawl_v1', title: clean(document.title, 240),
+    descriptions: [...document.querySelectorAll('meta[name="description" i]')].slice(0, 4).map(el => clean(el.content, 320)),
+    robots_meta: [...document.querySelectorAll('meta[name="robots" i],meta[name="googlebot" i]')].slice(0, 8)
+      .map(el => ({agent: clean(el.name, 40).toLowerCase(), content: clean(el.content, 300).toLowerCase()})),
+    canonicals: [...document.head.querySelectorAll('link[rel~="canonical" i]')].slice(0, 8).map(el => clean(el.href, 2048)),
+    viewport: clean(document.querySelector('meta[name="viewport"]')?.content), headings: htexts,
+    heading_count: headings.length, headings_complete: headings.length <= 60,
+    schema: {entities: schemas.slice(0, 100), microdata_types: [...new Set(microdata)], invalid_json_count: schemaInvalid,
+      script_count: ld.length, complete: !schemaLimited && schemas.length <= 100},
+    images: {count: images.length, missing_alt: images.filter(el => !el.hasAttribute('alt')).length,
+      empty_alt: images.filter(el => el.hasAttribute('alt') && !el.getAttribute('alt').trim()).length,
+      dimensions_missing: images.filter(el => !el.hasAttribute('width') || !el.hasAttribute('height')).length,
+      lazy: images.filter(el => el.loading === 'lazy').length},
+    mixed_content: [...document.querySelectorAll('script[src],img[src],iframe[src],link[rel="stylesheet"][href],video[src],audio[src]')]
+      .filter(el => /^(http:)/i.test(el.src || el.href)).length,
+    visible_words: bodyText.trim().split(/\s+/).length, paragraphs: paragraphs.length,
+    section_count: document.querySelectorAll('main section,article section').length,
+    faq: htexts.some(h => /frequently asked|\bfaq\b|common questions/i.test(h.text)),
+    breadcrumbs: !![...document.querySelectorAll('nav[aria-label*="breadcrumb" i],[itemtype$="/BreadcrumbList"]')].filter(visible).length,
+    testimonials: htexts.some(h => /testimonials|customer reviews|what (?:our )?customers say/i.test(h.text)),
+    video: !![...document.querySelectorAll('video')].filter(visible).length || iframes.some(i => /youtube.com|youtu.be|vimeo.com/.test(i.src)),
+    addresses, visible_location_context: [...new Set(localityMatches)], links: seoLinks, links_complete: anchors.length <= 250,
+    body_complete: document.readyState === 'complete' && bodyText.length < 150000,
+    service_area_context: /\b(?:areas? we (?:serve|cover)|service areas?|serving (?:the )?[A-Z][a-z]+(?: [A-Z][a-z]+)?(?: area| and|,))/i.test(bodyText),
+    // Supporting-detail presence only, not a word-count quality verdict.
+    supporting_detail: paragraphs.some(el => el.innerText.trim().length >= 80),
+    h1_body_overlap: htexts.filter(h => h.level === 1).some(h => h.text.toLowerCase().split(/[^a-z0-9]+/)
+      .filter(w => w.length > 3).some(w => paragraphs.some(p => p.innerText.toLowerCase().includes(w))))
+  };
   return {
     url: location.href, title: clean(document.title), ready_state: document.readyState,
     viewport: clean(document.querySelector('meta[name="viewport"]')?.content), http_status: httpStatus,
     blocked, soft_error: softError, soft_error_excerpt: softError ? clean(errorText) : "",
     body_available: !!document.body, text_length: bodyText.trim().length, link_count: anchors.length,
     limits_reached: count >= 10000 || anchors.length > 250 || allForms.length > 30 || contacts.length >= 150 || bodyText.length >= 150000,
-    links, contacts: contacts.slice(0, 150), forms, ctas, resources, iframes,
+    links, contacts: contacts.slice(0, 150), forms, ctas, resources, iframes, growth,
     generator: clean(document.querySelector('meta[name="generator"]')?.content),
     tracking: {ga: /gtag\(\s*['"]config['"]\s*,\s*['"]G-|google-analytics\.com|analytics\.js/.test(inline),
       gtm: /GTM-[A-Z0-9]+/.test(inline), meta_pixel: /fbq\(\s*['"]init['"]/.test(inline)},

@@ -4,6 +4,7 @@ from sqlalchemy import select
 from production_models import *
 from local_modes import run_mode, visible_business, LIVE_ERROR
 from lead_summary import qualify, lead_row, filter_sort, summary_csv, safe_cell
+from growth_scoring import growth_for_detail
 
 
 def job_view(db, job):
@@ -61,6 +62,7 @@ def details_for_job(db, businesses, job):
             pages=pages, evidence=evidence,
             contacts=[dict(c.data, id=c.id, normalized_value=c.normalized_value, type=c.kind, provenance=c.provenance) for c in buckets[BusinessContact][rid]],
             history=[dict(id=r.id, status=r.status) for r in histories[business.id]])
+        detail['digital_growth'] = growth_for_detail(detail)
         detail['summary'] = qualify(detail)
         details.append(detail)
     return details

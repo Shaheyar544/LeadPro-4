@@ -233,6 +233,8 @@ def qualify(detail):
         'browser_navigation_failed': 'Some pages could not be opened.',
         'browser_render_timeout': 'Some pages did not finish loading in time.',
         'browser_unavailable': 'The browser service was unavailable.',
+        'robots_unavailable': 'Robots policy could not be checked, so browsing was not started.',
+        'robots_disallowed': 'The website robots policy or access controls prevented this crawl.',
     }
     explanation = {
         'completed': 'The selected pages were inspected. Findings describe these pages, not every page on the website.',
@@ -245,7 +247,8 @@ def qualify(detail):
     identity_confidence = 1.0 if b.get('canonical_name') not in (None, '', 'Unverified business') else 0.0
     usable = commercially_usable_v2(b, usable_audit, score, identity_confidence=identity_confidence) if safe_url(b.get('website_url')) and score else False
     scored_keys = set(stored)
-    return dict(version=VERSION, business_name=name, name_basis=name_basis,
+    from growth_scoring import compact_growth
+    return dict(version=VERSION, business_name=name, name_basis=name_basis, digital_growth=compact_growth(detail),
                 website=safe_url(b.get('website_url')), website_display=display_url(b.get('website_url')),
                 location=', '.join(str(b[k]) for k in ('city', 'state') if b.get(k)),
                 **contacts, contact_page=contact_page, contact_paths=paths,
@@ -270,13 +273,28 @@ def lead_row(detail):
 
 
 def filter_sort(rows, *, audit_status=None, primary_opportunity=None, min_evidence=0, has_phone=False,
-                has_email=False, has_contact=False, min_opportunity=None, sort='useful'):
+                has_email=False, has_contact=False, min_opportunity=None, sort='useful', top_opportunity=None,
+                min_technical=None, min_on_page=None, min_local=None, recommended_service=None, min_growth_evidence=0):
+    def growth_matches(row):
+        g = row['summary']['digital_growth']
+        if top_opportunity and not any(o['label'] == top_opportunity for o in g['top_sales_opportunities']):
+            return False
+        if recommended_service and recommended_service not in g['recommended_services']['services']:
+            return False
+        if (g['overall_evidence_confidence'] or 0) < min_growth_evidence:
+            return False
+        for version, minimum in [('technical_seo_v1', min_technical), ('on_page_seo_v1', min_on_page), ('local_seo_v1', min_local)]:
+            p = g['profiles'][version]
+            if minimum is not None and (not p['sufficient'] or p['opportunity_score'] < minimum):
+                return False
+        return True
     rows = [r for r in rows if (not audit_status or r['audit_status'] == audit_status)
             and (not primary_opportunity or r['primary_opportunity'] == primary_opportunity)
             and (r['evidence_confidence'] or 0) >= min_evidence
             and (not has_phone or r['summary']['primary_phone']) and (not has_email or r['summary']['primary_email'])
             and (not has_contact or r['summary']['contact_paths'])
-            and (min_opportunity is None or (r['summary']['score_summary']['sufficient'] and r['opportunity_score'] >= min_opportunity))]
+            and (min_opportunity is None or (r['summary']['score_summary']['sufficient'] and r['opportunity_score'] >= min_opportunity))
+            and growth_matches(r)]
     def negative(row, key):
         value = row.get(key)
         return -value if value is not None else 1
@@ -287,6 +305,11 @@ def filter_sort(rows, *, audit_status=None, primary_opportunity=None, min_eviden
         'contact': lambda r: (negative(r, 'contact_confidence'),),
         'business': lambda r: (r['business_name'].casefold(),),
         'audit': lambda r: (r['audit_status'],),
+        'top_opportunity': lambda r: (-next((o['severity'] * o['confidence'] for o in r['summary']['digital_growth']['top_sales_opportunities']), -1),),
+        'technical': lambda r: (negative(r['summary']['digital_growth']['profiles']['technical_seo_v1'], 'opportunity_score'),),
+        'on_page': lambda r: (negative(r['summary']['digital_growth']['profiles']['on_page_seo_v1'], 'opportunity_score'),),
+        'local': lambda r: (negative(r['summary']['digital_growth']['profiles']['local_seo_v1'], 'opportunity_score'),),
+        'growth_evidence': lambda r: (negative(r['summary']['digital_growth'], 'overall_evidence_confidence'),),
     }
     return sorted(rows, key=lambda r: (*keys.get(sort, keys['useful'])(r), r['business_name'].casefold(), r['id']))
 
@@ -294,6 +317,8 @@ def filter_sort(rows, *, audit_status=None, primary_opportunity=None, min_eviden
 CSV_FIELDS = ('business_name', 'location', 'website', 'primary_phone', 'primary_email', 'contact_page', 'contact_paths',
               'primary_opportunity', 'opportunity_score', 'opportunity_display', 'digital_gap', 'evidence_confidence',
               'contact_confidence', 'audit_status', 'commercially_usable_v2', 'score_profile_version')
+from growth_scoring import GROWTH_CSV_FIELDS, csv_fields
+CSV_FIELDS += GROWTH_CSV_FIELDS
 
 
 def safe_cell(value):
@@ -312,5 +337,6 @@ def summary_csv(rows):
                     contact_paths='; '.join(s['contact_paths']), primary_opportunity=s['primary_opportunity'],
                     **{k: score[k] for k in ('opportunity_score', 'opportunity_display', 'digital_gap', 'evidence_confidence', 'contact_confidence')},
                     audit_status=s['audit_summary']['status'], commercially_usable_v2=s['commercially_usable_v2'], score_profile_version=score['profile_version'])
+        data.update(csv_fields(s['digital_growth']))
         writer.writerow([safe_cell(data.get(k)) for k in CSV_FIELDS])
     return output.getvalue()
