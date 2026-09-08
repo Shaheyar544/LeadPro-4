@@ -29,6 +29,23 @@ Read the [product contract](docs/V0_1_PRODUCT_CONTRACT.md),
 [CamoFox setup](docs/CAMOFOX_SETUP.md) and
 [Phase 3B architecture/scoring](docs/PHASE_3B_ARCHITECTURE.md).
 
+## One-click local launch
+
+For the existing [validated Docker setup](docs/DEPLOYMENT_DOCKER.md):
+
+1. Start Docker Desktop in Linux-container mode.
+2. Double-click `START_LOCAL.bat`.
+3. Wait for all six services to become healthy and the browser to open.
+4. Double-click `STOP_LOCAL.bat` when finished.
+
+The launchers use `compose.production.yaml` and the existing private
+`.local-integration/stack.env`; a missing configuration stops with its exact path.
+Complete the linked one-time database setup first. The dashboard is
+`https://localhost:8443`; its local Caddy CA may require browser trust. Launchers
+do not change Windows certificate trust. STOP preserves PostgreSQL data and all
+Compose volumes. PowerShell 7 is preferred, with Windows PowerShell as fallback;
+the HTTPS health check uses Windows `curl.exe`. Errors remain visible in the window.
+
 ## Local setup (Windows PowerShell)
 
 Python 3.11+ is required. Windows startup no longer depends on Unix file locking.
