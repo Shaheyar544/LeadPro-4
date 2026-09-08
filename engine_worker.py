@@ -147,7 +147,7 @@ class PersistentWorker:
         error = job["error_code"]
         for source in sources:
             state = states.get(source.name, {"pages": 0, "cursor": None, "done": False})
-            max_pages = min(self.settings.discovery_pages, 3 if source.name == "google_places" else 5)
+            max_pages = min(self.settings.discovery_pages, 3 if source.name in {"google_places", "google_places_new"} else 5)
             while not state["done"] and state["pages"] < max_pages:
                 job = self.store.job(jid)
                 remaining = job["target_count"] - job["discovered_count"]

@@ -141,6 +141,37 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider._json.await_count,1)
         self.assertEqual(store.job(jid)["discovered_count"],1)
 
+    async def test_google_new_pagination_mapping_and_deduplication(self):
+        provider = ProviderDiscovery("google_places_new", "SECRET")
+        requests = []
+        async def response(http, method, url, **kw):
+            requests.append((method, url, kw))
+            page = len(requests)
+            if page == 1:
+                return {"places": [{"id": "a", "displayName": {"text": "Alpha"}, "formattedAddress": "A", "websiteUri": "https://alpha.test", "nationalPhoneNumber": "+1 1", "rating": 4.5, "userRatingCount": 10}], "nextPageToken": "p2"}
+            if page == 2:
+                return {"places": [{"id": "a", "displayName": {"text": "Alpha"}}, {"id": "b", "displayName": {"text": "Beta"}, "formattedAddress": "B"}], "nextPageToken": "p3"}
+            return {"places": [{"id": "c", "displayName": {"text": "Gamma"}}]}
+        provider._json = AsyncMock(side_effect=response)
+        fixture = FixtureStore(); self.addCleanup(fixture.close)
+        job = fixture.job(target_count=50); worker = PersistentWorker(fixture.store, EngineConfig(discovery_pages=3), sources=[provider]); fixture.store.claim_job(worker.id)
+        await worker._discover(job["id"])
+        self.assertEqual(fixture.store.job(job["id"])["discovered_count"], 3)
+        self.assertEqual([r[2].get("json", {}).get("pageToken") for r in requests], [None, "p2", "p3"])
+        with fixture.store.transaction() as conn:
+            ids = [r[0] for r in conn.execute("SELECT provider_record_id FROM business_sources WHERE provider='google_places_new'")]
+        self.assertIn("google_places_new:a", ids)
+        self.assertEqual(len(ids), 3)
+
+    async def test_google_new_http_failures_and_partial_page(self):
+        provider = ProviderDiscovery("google_places_new", "SECRET")
+        provider._json = AsyncMock(side_effect=[{"places": [{"id": "a", "displayName": {"text": "Alpha"}}], "nextPageToken": "p2"}, DiscoveryError("google_new_forbidden")])
+        first = await provider.fetch_page(REQUEST, None, 20)
+        self.assertEqual(len(first.records), 1)
+        with self.assertRaises(DiscoveryError) as caught:
+            await provider.fetch_page(REQUEST, first.cursor, 20)
+        self.assertEqual(caught.exception.code, "google_new_forbidden")
+
 
 class ProviderIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def smoke(self, provider, flag, key_name):
@@ -169,6 +200,17 @@ class ProviderIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_google_places(self):
         await self.smoke("google_places","RUN_GOOGLE_PLACES_INTEGRATION_TESTS","GOOGLE_PLACES_API_KEY")
+
+    async def test_google_places_new(self):
+        if os.getenv("RUN_GOOGLE_PLACES_NEW_INTEGRATION_TESTS") != "1":
+            self.skipTest("Opt-in Google Places New integration disabled")
+        import config
+        key = os.getenv("GOOGLE_PLACES_NEW_API_KEY") or os.getenv("GOOGLE_PLACES_API_KEY", "")
+        if not key:
+            self.skipTest("Google Places New credential not configured")
+        page = await ProviderDiscovery("google_places_new", key).fetch_page(dict(category="Roofing", city="Dallas", state="TX"), limit=1)
+        self.assertTrue(page.records)
+        self.assertTrue(page.records[0]["provider_record_id"].startswith("google_places_new:"))
 
     async def test_yelp(self):
         await self.smoke("yelp","RUN_YELP_INTEGRATION_TESTS","YELP_API_KEY")

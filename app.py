@@ -1159,7 +1159,7 @@ async def api_test_outreach_account(aid: int, user: str = Depends(get_current_us
     return {"ok": ok, "error": err, "email": email_addr, "mode": "smtp_password"}
 
 # ── Config ──
-_PROVIDER_KEYS = {"SERPER_API_KEY", "GOOGLE_PLACES_API_KEY", "YELP_API_KEY",
+_PROVIDER_KEYS = {"SERPER_API_KEY", "GOOGLE_PLACES_API_VERSION", "GOOGLE_PLACES_NEW_API_KEY", "GOOGLE_PLACES_API_KEY", "YELP_API_KEY",
                   "PAGESPEED_API_KEY", "OPENROUTER_API_KEY"}
 
 

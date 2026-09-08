@@ -5,14 +5,15 @@ from utils import csv_safe_cell
 
 SCORE_FIELDS = ("opportunity_score", "digital_gap", "business_strength", "evidence_confidence", "contact_confidence")
 DETECTOR_FIELDS = ("contact_form", "quote_form", "booking_form", "booking_widget", "chat_widget", "primary_cta", "click_to_call", "request_quote_cta", "booking_cta", "contact_cta", "facebook", "instagram", "linkedin", "youtube", "cms")
-CSV_FIELDS = ("business_name", "category", "city", "state", "website", "emails", "phones", "email_source_urls", "phone_source_urls", "profile", *SCORE_FIELDS, *DETECTOR_FIELDS, "audit_status", "observed_at")
+CSV_FIELDS = ("business_name", "provider", "provider_record_id", "category", "city", "state", "website", "emails", "phones", "email_source_urls", "phone_source_urls", "profile", *SCORE_FIELDS, *DETECTOR_FIELDS, "audit_status", "observed_at")
 
 
 def summary(detail):
     business, score, audit = detail["business"], detail["score"] or {}, detail["audit"] or {}
     contacts = detail["contacts"]
     findings = score.get("breakdown", {}).get("findings", {})
-    row = dict(id=business["id"], business_name=business["canonical_name"], category=business["category"],
+    source = (detail.get("sources") or [{}])[0]
+    row = dict(id=business["id"], business_name=business["canonical_name"], provider=source.get("provider", ""), provider_record_id=source.get("provider_record_id", ""), category=business["category"],
                city=business["city"], state=business["state"], website=business["website_url"],
                profile=score.get("profile_version", "website_conversion_v1"),
                audit_status=audit.get("status", "pending"), observed_at=audit.get("finished_at"),

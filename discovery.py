@@ -74,9 +74,11 @@ class ProviderDiscovery:
         try:
             async with http.request(method, url, allow_redirects=False, **kwargs) as response:
                 if response.status == 429:
-                    raise DiscoveryError("google_over_query_limit" if self.name == "google_places" else "provider_limit")
+                    raise DiscoveryError("google_new_rate_limited" if self.name == "google_places_new" else ("google_over_query_limit" if self.name == "google_places" else "provider_limit"))
+                if response.status in (401, 403) and self.name == "google_places_new":
+                    raise DiscoveryError("google_new_unauthorized" if response.status == 401 else "google_new_forbidden")
                 if response.status != 200:
-                    raise DiscoveryError("google_http_error" if self.name == "google_places" else "provider_unavailable")
+                    raise DiscoveryError("google_new_http_error" if self.name == "google_places_new" else ("google_http_error" if self.name == "google_places" else "provider_unavailable"))
                 chunks, size = [], 0
                 async for chunk in response.content.iter_chunked(65536):
                     size += len(chunk)
@@ -88,11 +90,11 @@ class ProviderDiscovery:
                     raise ValueError
                 return data
         except asyncio.TimeoutError:
-            raise DiscoveryError("google_transport_timeout" if self.name == "google_places" else "provider_unavailable") from None
+            raise DiscoveryError("google_new_transport_timeout" if self.name == "google_places_new" else ("google_transport_timeout" if self.name == "google_places" else "provider_unavailable")) from None
         except aiohttp.ClientError:
-            raise DiscoveryError("google_http_transport_error" if self.name == "google_places" else "provider_unavailable") from None
+            raise DiscoveryError("google_new_http_error" if self.name == "google_places_new" else ("google_http_transport_error" if self.name == "google_places" else "provider_unavailable")) from None
         except (ValueError, UnicodeError):
-            raise DiscoveryError("google_malformed_response" if self.name == "google_places" else "provider_protocol_error") from None
+            raise DiscoveryError("google_new_malformed_response" if self.name == "google_places_new" else ("google_malformed_response" if self.name == "google_places" else "provider_protocol_error")) from None
 
     async def fetch_page(self, job, cursor=None, limit=20, cancelled=lambda: False):
         limit = max(1, min(limit, 20))
@@ -124,6 +126,35 @@ class ProviderDiscovery:
                 total = numeric(data.get("total"), 100000000, True) or end
                 more = bool(places) and end < min(total, 240)
                 return DiscoveryPage(rows, end if more else None, None if more else "provider_limit" if end >= 240 else "discovery_exhausted")
+            if self.name == "google_places_new":
+                query_body = {"textQuery": query, "pageSize": 20, "regionCode": "US", "languageCode": "en"}
+                if cursor:
+                    query_body = {"textQuery": query, "pageSize": 20, "regionCode": "US", "languageCode": "en", "pageToken": cursor}
+                mask = "places.id,places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.rating,places.userRatingCount,places.primaryType,places.businessStatus,nextPageToken"
+                data = await self._json(http, "POST", "https://places.googleapis.com/v1/places:searchText", headers={"X-Goog-Api-Key": self._key, "X-Goog-FieldMask": mask, "Content-Type": "application/json"}, json=query_body)
+                places = data.get("places")
+                if places is None:
+                    if data.get("nextPageToken") is None and not data:
+                        raise DiscoveryError("google_new_malformed_response")
+                    places = []
+                if not isinstance(places, list):
+                    raise DiscoveryError("google_new_malformed_response")
+                rows = []
+                for p in places[:limit]:
+                    if cancelled() or not isinstance(p, dict):
+                        break
+                    display = p.get("displayName") or {}
+                    pid = text(p.get("id"), 300)
+                    if not pid or not text(display.get("text")):
+                        continue
+                    rows.append(record(self.name, {"id": "google_places_new:" + pid, "name": display.get("text"), "website": p.get("websiteUri"), "phone": p.get("nationalPhoneNumber"), "address": p.get("formattedAddress"), "rating": p.get("rating"), "reviews": p.get("userRatingCount"), "source_url": "https://www.google.com/maps/search/?api=1&query=" + quote(display.get("text", "")) + "&query_place_id=" + quote(pid)}, job))
+                next_cursor = data.get("nextPageToken")
+                if next_cursor is not None and not isinstance(next_cursor, str):
+                    raise DiscoveryError("google_new_malformed_response")
+                diagnostics = {"page": 1 if not cursor else 2, "token_attempts": 1 if cursor else 0, "token_wait_ms": 0, "statuses": ["HTTP_200"], "next_page_token": bool(next_cursor)}
+                if not rows and not next_cursor:
+                    return DiscoveryPage([], None, "google_new_zero_results", diagnostics)
+                return DiscoveryPage([r for r in rows if r], next_cursor, None if next_cursor else "discovery_exhausted", diagnostics)
             if self.name != "google_places":
                 raise DiscoveryError("provider_protocol_error")
             params = {"key": self._key, "language": "en"}
@@ -186,19 +217,30 @@ class ProviderDiscovery:
 
 def configured_sources():
     import config
+    google_name = "google_places_new" if config.GOOGLE_PLACES_API_VERSION == "new" else "google_places"
+    google_key = config.GOOGLE_PLACES_NEW_API_KEY or config.GOOGLE_PLACES_API_KEY if config.GOOGLE_PLACES_API_VERSION == "new" else config.GOOGLE_PLACES_API_KEY
     return [ProviderDiscovery(name, key) for name, key in (
-        ("serper_maps", config.SERPER_API_KEY), ("google_places", config.GOOGLE_PLACES_API_KEY),
+        ("serper_maps", config.SERPER_API_KEY), (google_name, google_key),
         ("yelp", config.YELP_API_KEY)) if key]
 
 
 def provider_readiness():
     """Local configuration only. This diagnostic never contacts providers."""
     import config
-    providers = (("serper_maps", "SERPER_API_KEY", "one_page", 1),
-                 ("google_places", "GOOGLE_PLACES_API_KEY", "next_page_token", 3),
-                 ("yelp", "YELP_API_KEY", "offset", 5))
-    return {name: dict(configured=bool(getattr(config, env, "")),
-                       adapter_enabled=bool(getattr(config, env, "")),
-                       pagination=pagination, hard_max_pages=pages,
-                       config_status="configured_unverified" if getattr(config, env, "") else "not_configured",
-                       quota_status="unknown") for name, env, pagination, pages in providers}
+    providers = [("serper_maps", "SERPER_API_KEY", "one_page", 1)]
+    # Keep the historical response shape for installations with no New key;
+    # once New is configured, expose both generations distinctly.
+    if config.GOOGLE_PLACES_NEW_API_KEY or (config.GOOGLE_PLACES_API_VERSION == "new" and config.GOOGLE_PLACES_API_KEY):
+        providers.append(("google_places_new", "GOOGLE_PLACES_NEW_API_KEY", "page_token", 3))
+    providers.extend([("google_places", "GOOGLE_PLACES_API_KEY", "next_page_token", 3),
+                      ("yelp", "YELP_API_KEY", "offset", 5)])
+    result = {}
+    for name, env, pagination, pages in providers:
+        configured = bool(getattr(config, env, ""))
+        if name == "google_places_new" and config.GOOGLE_PLACES_API_VERSION == "new":
+            configured = bool(config.GOOGLE_PLACES_NEW_API_KEY or config.GOOGLE_PLACES_API_KEY)
+        result[name] = dict(configured=configured, adapter_enabled=configured,
+                            pagination=pagination, hard_max_pages=pages,
+                            config_status="configured_unverified" if configured else "not_configured",
+                            quota_status="unknown")
+    return result
