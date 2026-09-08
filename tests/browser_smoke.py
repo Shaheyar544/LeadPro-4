@@ -109,6 +109,12 @@ def main():
                     assert 'office@public-business.test' in page.locator('#detail-content').inner_text()
                     assert page.locator('#detail-content img').count() == 0
                     assert page.locator('#detail-content .status-unknown').count() > 0
+                    assert page.get_by_role('heading', name='Technical SEO', exact=True).count() == 1
+                    assert page.get_by_role('heading', name='On-Page SEO', exact=True).count() == 1
+                    page.get_by_text('Page and service analysis', exact=True).click()
+                    assert page.locator('#detail-content img').count() == 0
+                    assert page.evaluate('typeof window.__xss') == 'undefined'
+                    page.get_by_text('Page and service analysis', exact=True).click()
                     technical = page.locator('#detail-content details').filter(has=page.locator('summary', has_text='Show technical evidence')).first
                     assert not technical.evaluate('node => node.open')
                     technical.locator('summary').first.click()
@@ -129,6 +135,7 @@ def main():
                         page.get_by_role("button", name="Export this view (CSV)").click()
                     downloaded = Path(download.value.path()).read_text(encoding='utf-8')
                     assert "'=SUM(1,2)" in downloaded and "'+15125551234" in downloaded
+                    assert 'technical_seo_opportunity' in downloaded and 'recommended_service_3' in downloaded
                     page.get_by_role("button", name="Lead Generation", exact=True).click()
                     page.locator('#category').fill('Plumber')
                     page.locator('#city').fill('Austin'); page.locator('#state').fill('TX'); page.locator('#target_count').fill('2')

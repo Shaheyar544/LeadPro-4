@@ -40,6 +40,7 @@ jobs:
       - run: python -m pip check
       - run: node --check foundation.js
       - run: node --check qualification.js
+      - run: node --check audit_engine/extract.js
       - run: pytest -q
       - run: docker build -t leadpro-ci .
       - run: docker pull ghcr.io/gitleaks/gitleaks:v8.30.1

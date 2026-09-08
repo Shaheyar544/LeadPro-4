@@ -9,6 +9,8 @@ from audit_engine.runner import AuditEngine
 from engine_worker import PersistentWorker
 from discovery import DiscoveryPage
 from tests.engine_fixtures import business, facts
+from tests.growth_fixtures import facts as growth_facts, FixtureResources
+from dataclasses import replace
 
 PAYLOAD = '=SUM(1,2) <img src=x onerror="window.__xss=1"> Fixture Business'
 home = facts(links=[{"href": "/contact", "text": "Contact"}, {"href": "/about", "text": "About"}])
@@ -35,5 +37,10 @@ browser = SlowMock({home["url"]: home, contact["url"]: contact,
                    "https://business.test/about": facts("https://business.test/about"),
                    "https://blocked.test/": facts("https://blocked.test/", blocked=True),
                    "https://offline.test/": BrowserError("browser_unavailable")})
+for url, fixture in browser.fixtures.items():
+    if isinstance(fixture, dict) and not fixture.get('blocked'):
+        fixture['growth'] = growth_facts(url=url)['growth']
+        fixture['growth']['headings'].append(dict(level=2, text='Repair ' + PAYLOAD))
+settings = replace(application.engine_settings, growth_enabled=True)
 application.evidence_worker = PersistentWorker(application.engine_store, application.engine_settings,
-    browser, [Source()], AuditEngine(browser, application.engine_settings, validate=AsyncMock(side_effect=lambda url: url)))
+    browser, [Source()], AuditEngine(browser, settings, validate=AsyncMock(side_effect=lambda url: url), resources_factory=FixtureResources))

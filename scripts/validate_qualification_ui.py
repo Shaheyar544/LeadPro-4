@@ -100,7 +100,8 @@ def main():
             assert not technical.evaluate('node => node.open')
             assert 'fixture-business.test' not in page.locator('#detail-content').text_content()
             assert page.locator('#detail-content > section > h3').all_text_contents() == [
-                'Audit summary','Primary opportunity','Public contact','Confirmed strengths','Confirmed gaps','Could not confirm','Pages inspected','Why this score']
+                'Digital Growth overview','Audit summary','Primary opportunity','Public contact','Confirmed strengths','Confirmed gaps','Could not confirm','Pages inspected','Why this score',
+                'Technical SEO','On-Page SEO','Local SEO','Additional assessments']
             technical.locator('summary').first.click()
             assert page.locator('.evidence-card').count() > 0
             technical.locator('summary').first.click()

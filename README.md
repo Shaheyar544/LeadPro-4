@@ -1,23 +1,31 @@
 # Local Business Lead Intelligence Engine
 
+The local Docker stack now includes **Digital Growth Audit v1**: Technical SEO,
+On-Page SEO and Local SEO profiles, deterministic recommended services and Top
+Sales Opportunities from one shared CamoFox crawl. See the
+[audit guide](docs/DIGITAL_GROWTH_AUDIT_V1.md) and
+[exact scoring rules](docs/SEO_SCORING_V1.md). Higher opportunity scores mean
+stronger confirmed improvement opportunities; unknowns do not add gap points.
+Rank tracking, backlinks and social audits remain not configured.
+
 This fork of [CodePhantom-1/LeadPro-4](https://github.com/CodePhantom-1/LeadPro-4)
-is becoming a Local Business Lead Intelligence Engine. Phase 3B adds a persistent
-SQLite evidence worker to the hardened FastAPI and plain HTML/JS foundation.
+provides a Local Business Lead Intelligence Engine with FastAPI and a plain
+HTML/JavaScript dashboard.
 
-**Local prototype, not production-ready.** The primary browser provider is the
-separate official CamoFox REST service, behind a replaceable Python interface.
-No full Playwright browser worker or Phase 3C features are implemented.
+The local production-like stack uses Caddy, API, Worker, PostgreSQL, Redis and
+private CamoFox. The retained SQLite development harness is not a production
+storage path. Public deployment and commercial validation are separate gates.
 
-## Current V0.1 scope
+## Current local scope
 
 - Dashboard, Lead Generation, Leads and Settings.
-- U.S. category/city/state search, target 1–100, **Website Conversion Improvement**.
-- Bounded Serper Maps, Google Places and Yelp discovery, with explicit shortfalls.
+- U.S. category/city/state search, target 1–100, with conversion and Digital Growth evidence.
+- LIVE Google Places API (New) discovery, with explicit shortfalls and no fixture fallback.
 - Persistent jobs, restart recovery, owner-scoped progress and cancellation.
-- Isolated browser audits: homepage, one contact/quote page, one about or services page.
+- One bounded browser crawl shared across conversion and SEO modules.
 - Rendered public business contacts and versioned evidence with source URLs.
-- Five separate scores: opportunity, digital gap, business strength, evidence
-  confidence and contact confidence. Unknown/blocked checks do not become gaps.
+- Versioned opportunity profiles, evidence coverage and contact confidence.
+  Unknown/blocked checks do not become gaps; provider ratings are not business scores.
 - Evidence details and formula-safe CSV export from normalized records.
 
 Outreach, public sending, owner enrichment, billing and messaging remain disabled.

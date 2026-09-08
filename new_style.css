@@ -1202,3 +1202,26 @@ body.theme-light #business-detail { background: #fff; color: #0f172a; }
   .filter-actions { grid-column: 4 / -1; align-self: end; justify-content: flex-end; }
 }
 .search-context label, .lead-filters label, .lead-filters legend { text-transform: none; letter-spacing: 0; }
+.growth-filters { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 8px; }
+.growth-filters > summary { padding: 12px 0; cursor: pointer; min-height: 44px; font-weight: 600; }
+.growth-filter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 12px 0; }
+.growth-opportunities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0; list-style-position: inside; }
+.growth-opportunities > li { padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); overflow-wrap: anywhere; }
+.growth-opportunities p { font-size: 14px; line-height: 1.5; }
+.growth-sources { display: grid; gap: 10px; overflow-wrap: anywhere; }
+.qualification-table th:first-child { width: 14%; }
+.qualification-table th:nth-child(2) { width: 7%; }
+.qualification-table th:nth-child(3) { width: 11%; }
+.qualification-table th:nth-child(4) { width: 12%; }
+.qualification-table th:nth-child(5) { width: 9%; }
+.qualification-table th:nth-child(6) { width: 10%; }
+.qualification-table th:nth-child(7) { width: 9%; }
+.qualification-table th:nth-child(8) { width: 10%; }
+.qualification-table th:nth-child(9) { width: 9%; }
+.qualification-table th:last-child { width: 9%; }
+.qualification-table .secondary { overflow-wrap: normal; word-break: normal; }
+@media (max-width: 760px) {
+  .growth-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .growth-opportunities { grid-template-columns: 1fr; }
+}
+@media (max-width: 540px) { .growth-filter-grid { grid-template-columns: 1fr; } }
