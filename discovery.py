@@ -7,7 +7,7 @@ import math
 import time
 from urllib.parse import quote
 import aiohttp
-from engine_store import domain
+from engine_utils import domain
 from url_safety import normalize_url, UnsafeURL
 
 

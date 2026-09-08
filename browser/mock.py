@@ -1,7 +1,7 @@
 """Deterministic offline provider. It never performs network operations."""
 import copy
 from .base import BrowserProvider, BrowserSession, BrowserPage, BrowserHealth, BrowserError
-from engine_store import uid
+from engine_utils import uid
 
 
 class MockBrowserProvider(BrowserProvider):

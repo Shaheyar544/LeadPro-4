@@ -1,13 +1,44 @@
 name: CI
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
- test:
-  runs-on: ubuntu-latest
-  steps:
-   - uses: actions/checkout@v4
-   - uses: actions/setup-python@v5
-     with: {python-version: '3.12'}
-   - run: pip install -r requirements-dev.txt
-   - run: python -m compileall -q .
-   - run: pytest -q
-   - run: docker build -t leadpro-ci .
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: leadpro_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d leadpro_ci"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # Fresh CI services only; production Compose never uses trust authentication.
+      DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/leadpro_ci
+      REDIS_URL: redis://localhost:6379/0
+      RUN_POSTGRES_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: pip install -r requirements-dev.txt
+      - run: alembic upgrade head
+      - run: alembic check
+      - run: python -m compileall -q .
+      - run: python -m pip check
+      - run: node --check foundation.js
+      - run: pytest -q
+      - run: docker build -t leadpro-ci .
+      - run: docker pull ghcr.io/gitleaks/gitleaks:v8.30.1
+      - run: python scripts/scan_secrets.py

@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from urllib.parse import urlsplit, quote
-from engine_store import domain
+from engine_utils import domain
 
 import aiohttp
 

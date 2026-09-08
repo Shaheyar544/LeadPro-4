@@ -1,1 +1,27 @@
-:80 { reverse_proxy api:8000 }
+{
+	auto_https disable_redirects
+	skip_install_trust
+	# Runtime proxy errors include request headers unless explicitly filtered.
+	# Remove the whole request object, including CSRF and query-string values.
+	log {
+		format filter {
+			wrap json
+			fields {
+				request delete
+			}
+		}
+	}
+}
+https://localhost {
+	tls internal
+	# API accepts this overwritten header only from the resolved Caddy peer.
+	reverse_proxy api:8000 {
+		header_up X-LeadPro-Client-IP {remote_host}
+		header_up -X-Forwarded-For
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	}
+}

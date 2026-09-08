@@ -1,7 +1,7 @@
 """Evidence detectors operate on bounded rendered facts, never raw source HTML."""
 import re
 from urllib.parse import urlsplit, unquote, urljoin
-from engine_store import now, uid, domain
+from engine_utils import now, uid, domain
 from url_safety import normalize_url, UnsafeURL
 
 VERSION = "rendered_dom_v1.3"

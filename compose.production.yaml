@@ -1,28 +1,135 @@
+name: leadpro-phase4a2
+x-app-env: &app-env
+  APP_ENV: production
+  DATABASE_URL: postgresql+psycopg://leadpro:${POSTGRES_PASSWORD:?local password required}@postgres:5432/leadpro
+  REDIS_URL: redis://redis:6379/0
+  SESSION_SECRET: ${SESSION_SECRET:?session secret required}
+  INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:?admin password required}
+  APP_ORIGIN: https://localhost:8443
+  SECURE_COOKIES: "true"
+  DEBUG: "false"
+  RELOAD: "false"
+  IN_PROCESS_WORKER: "false"
+  SCHEDULER_ENABLED: "false"
+  OUTREACH_ENABLED: "false"
+  CORS_ALLOW_WILDCARD: "false"
+  CAMOFOX_BASE_URL: http://camofox:9377
+  CAMOFOX_ACCESS_KEY: ${CAMOFOX_ACCESS_KEY:?browser access key required}
+  CAMOFOX_INTERACTIVE: "off"
+  CAMOFOX_CRASH_REPORT_ENABLED: "false"
+  ENABLE_VNC: "false"
+  CAMOFOX_PERSISTENCE_ENABLED: "false"
+  DISCOVERY_MODE: ${DISCOVERY_MODE:-disabled}
+  LOCAL_INTEGRATION_TEST: ${LOCAL_INTEGRATION_TEST:-false}
+  OFFLINE_ITEM_DELAY: ${OFFLINE_ITEM_DELAY:-0}
+  GOOGLE_PLACES_NEW_API_KEY: ${GOOGLE_PLACES_NEW_API_KEY:-}
 services:
- caddy:
-  image: caddy:2.8-alpine
-  ports: ["80:80","443:443"]
-  volumes: ["./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"]
-  depends_on: [api]
- api:
-  build: .
-  command: uvicorn lead_engine.api:app --host 0.0.0.0 --port 8000
-  environment: [APP_ENV=production, DATABASE_URL=postgresql+psycopg://leadpro:$${POSTGRES_PASSWORD}@postgres:5432/leadpro, REDIS_URL=redis://redis:6379/0, CAMOFOX_URL=http://camofox:9374]
-  depends_on: [postgres,redis,camofox]
- worker:
-  build: .
-  command: python -m lead_engine.worker
-  environment: [APP_ENV=production, DATABASE_URL=postgresql+psycopg://leadpro:$${POSTGRES_PASSWORD}@postgres:5432/leadpro, REDIS_URL=redis://redis:6379/0, CAMOFOX_URL=http://camofox:9374]
-  depends_on: [postgres,redis,camofox]
- postgres:
-  image: postgres:16-alpine
-  environment: [POSTGRES_DB=leadpro,POSTGRES_USER=leadpro,POSTGRES_PASSWORD=$${POSTGRES_PASSWORD}]
-  volumes: [pgdata:/var/lib/postgresql/data]
- redis:
-  image: redis:7-alpine
-  command: redis-server --appendonly no
- camofox:
-  image: ghcr.io/jo-inc/camofox-browser:1.14.0
-  environment: [CAMOFOX_HEADLESS=true,CAMOFOX_TELEMETRY=false,CAMOFOX_PERSISTENCE=false]
-  expose: ["9374"]
-volumes: {pgdata: {}}
+  caddy:
+    image: caddy:2.8-alpine
+    ports: ["127.0.0.1:8443:443"]
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    depends_on: [api]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  api:
+    build: .
+    image: leadpro-phase4a2:local
+    command: uvicorn lead_engine.api:app --host 0.0.0.0 --port 8000 --no-proxy-headers --no-access-log
+    environment:
+      <<: *app-env
+      SERVICE_ROLE: api
+    networks: [edge, data]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "python", "-m", "lead_engine.check", "api"]
+      interval: 5s
+      timeout: 4s
+      retries: 6
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  worker:
+    build: .
+    image: leadpro-phase4a2:local
+    command: python -m lead_engine.worker
+    environment:
+      <<: *app-env
+      SERVICE_ROLE: worker
+    networks: [data, browser]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-m", "lead_engine.check", "worker"]
+      interval: 5s
+      timeout: 4s
+      retries: 3
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      camofox: {condition: service_healthy}
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: leadpro
+      POSTGRES_USER: leadpro
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?local password required}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadpro -d leadpro"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly no --save ""
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  camofox:
+    build: ./docker/camofox
+    image: leadpro-camofox:local
+    init: true
+    environment:
+      CAMOFOX_BIND_HOST: 0.0.0.0
+      CAMOFOX_PORT: "9377"
+      CAMOFOX_ACCESS_KEY: ${CAMOFOX_ACCESS_KEY:?browser access key required}
+      CAMOFOX_INTERACTIVE: "off"
+      CAMOFOX_CRASH_REPORT_ENABLED: "false"
+      ENABLE_VNC: "false"
+      SESSION_TIMEOUT_MS: "120000"
+      TAB_INACTIVITY_MS: "120000"
+      NODE_ENV: production
+    networks: [browser]
+    shm_size: 512mb
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9377/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+networks:
+  edge: {}
+  data: {internal: true}
+  browser: {}
+volumes:
+  pgdata: {}
+  caddy_data: {}
+  caddy_config: {}

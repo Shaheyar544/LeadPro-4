@@ -11,7 +11,7 @@ ARRAYS = ("links", "contacts", "forms", "ctas", "resources")
 
 
 async def observe(browser, page, expression, timeout_ms, validate, expected_domain):
-    from engine_store import domain
+    from engine_utils import domain
     end = time.monotonic() + timeout_ms / 1000
     previous, latest, samples = None, None, []
     reason = "browser_dom_timeout"

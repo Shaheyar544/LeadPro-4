@@ -5,7 +5,7 @@ import time
 
 from browser.base import BrowserError
 from browser.camofox import validate_destination
-from engine_store import now, uid, domain
+from engine_utils import now, uid, domain
 from .detectors import KEYS, evidence, detect, selected_links, public_contacts
 
 EXTRACT = Path(__file__).with_name("extract.js").read_text(encoding="utf-8")
@@ -165,10 +165,15 @@ class AuditEngine:
             result["error_code"] = next((p.get("error_code") for p in result["pages"] if p["status"] != "completed" and p.get("error_code")), None)
             if result["status"] == "partial" and not result["error_code"]: result["error_code"] = "audit_incomplete"
         if result["status"] == "completed" and not cancelled():
-            import config
-            if config.PAGESPEED_API_KEY:
+            import os
+            if os.getenv('APP_ENV') == 'production':
+                pagespeed_key = os.getenv('PAGESPEED_API_KEY', '')
+            else:
+                import config
+                pagespeed_key = config.PAGESPEED_API_KEY
+            if pagespeed_key:
                 from .pagespeed import measure
-                measurement = await measure(result["final_url"], config.PAGESPEED_API_KEY)
+                measurement = await measure(result["final_url"], pagespeed_key)
                 result["evidence"].append(evidence("pagespeed", "present" if measurement else "unknown", measurement,
                                                    url=result["final_url"], locator="PageSpeed Insights mobile performance", confidence=0.95))
         if not any(e["detector_key"] == "pagespeed" for e in result["evidence"]):

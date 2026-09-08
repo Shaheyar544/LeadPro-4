@@ -3,7 +3,11 @@
 const $ = id => document.getElementById(id);
 const fields = ['category', 'city', 'state', 'target_count', 'opportunity_profile'];
 const pages = {dashboard: 'Dashboard', leadgen: 'Lead Generation', leads: 'Leads', settings: 'Settings'};
-let token = localStorage.getItem('lead_engine_token') || '';
+// Compatibility is enabled only by the legacy development server's mode route.
+let authMode = 'cookie';
+let token = ''; // Development-only, memory-only legacy credential.
+let csrfToken = '';
+let signedIn = false;
 let offset = 0;
 let pollGeneration = 0;
 let currentUser = '';
@@ -18,26 +22,29 @@ function textElement(tag, text) {
 function showError(error) { $('app-error').textContent = error.message || 'Request failed.'; }
 
 async function api(path, options = {}) {
-  const headers = {'Authorization': `Bearer ${token}`, ...(options.headers || {})};
+  const headers = {...(options.headers || {})};
+  if (authMode === 'legacy-development' && token) headers.Authorization = `Bearer ${token}`;
+  if (authMode === 'cookie' && !['GET', 'HEAD'].includes(options.method || 'GET')) headers['X-CSRF-Token'] = csrfToken;
   if (options.body) headers['Content-Type'] = 'application/json';
-  const response = await fetch(path, {...options, headers});
+  const response = await fetch(path, {...options, headers, credentials: 'same-origin'});
   if (!response.ok) {
     let detail;
     try { detail = (await response.json()).detail; } catch { /* Generic fallback */ }
     const error = new Error(typeof detail === 'string' ? detail : `Request failed (${response.status}).`);
     error.detail = detail;
     error.status = response.status;
-    if (response.status === 401) logout();
+    if (response.status === 401) clearSession();
     throw error;
   }
   return response;
 }
 
-function logout() {
+function clearSession() {
   pollGeneration++;
   token = '';
   currentUser = '';
-  localStorage.removeItem('lead_engine_token');
+  csrfToken = '';
+  signedIn = false;
   $('layout').hidden = true;
   $('login-panel').hidden = false;
   $('lead-rows').replaceChildren();
@@ -158,9 +165,8 @@ async function loadJobs() {
 async function pollJob(jid) {
   const generation = ++pollGeneration;
   activeJob = jid;
-  localStorage.setItem('lead_engine_job_' + currentUser, jid);
   $('lg-btn').disabled = true;
-  while (generation === pollGeneration && token) {
+  while (generation === pollGeneration && signedIn) {
     try {
       const data = await (await api(`/api/leadgen/jobs/${encodeURIComponent(jid)}`)).json();
       if (generation !== pollGeneration) return;
@@ -172,7 +178,6 @@ async function pollJob(jid) {
         textElement('li', data.error_message || 'Progress is saved to the database.'));
       $('cancel-job').disabled = !active || Boolean(data.cancel_requested);
       if (!active) {
-        localStorage.removeItem('lead_engine_job_' + currentUser);
         $('lg-btn').disabled = false;
         await loadJobs();
         return;
@@ -180,7 +185,6 @@ async function pollJob(jid) {
     } catch (error) {
       $('job-state').textContent = 'Progress unavailable. Reload to reconnect to the saved job.';
       if (error.status === 404) {
-        localStorage.removeItem('lead_engine_job_' + currentUser);
         $('lg-btn').disabled = false;
         $('cancel-job').disabled = true;
         return;
@@ -200,9 +204,9 @@ function statusBadge(value) {
 }
 
 async function showDetail(bid) {
-  const sessionToken = token;
+  const sessionUser = currentUser;
   const detail = await (await api(`/api/businesses/${encodeURIComponent(bid)}`)).json();
-  if (!token || token !== sessionToken) return;
+  if (!signedIn || currentUser !== sessionUser) return;
   const business = detail.business, score = detail.score;
   $('detail-title').textContent = business.canonical_name;
   const nodes = [textElement('p', [business.category, business.city, business.state, business.address].filter(Boolean).join(' · ')),
@@ -235,7 +239,7 @@ async function showDetail(bid) {
   for (const [key, finding] of Object.entries(findingMap)) {
     const section = document.createElement('section'); section.className = 'evidence-card';
     const heading = textElement('h4', friendly(key)); heading.append(' ', statusBadge(finding.status)); section.append(heading);
-    const component = score.breakdown.components.find(c => c.detector_key === key);
+    const component = (score.breakdown.components || []).find(c => c.detector_key === key);
     if (component) section.append(textElement('p', `Scoring status: ${friendly(component.status)} · Weight ${component.weight} · Gap points: ${component.gap_points ?? 'excluded'}`));
     for (const e of detail.evidence.filter(e => e.detector_key === key)) {
       section.append(textElement('p', `${friendly(e.status)} · ${e.value == null ? 'No measured value' : typeof e.value === 'object' ? JSON.stringify(e.value) : e.value}`),
@@ -268,14 +272,15 @@ $('check-browser').addEventListener('click', async () => {
 async function enterWorkspace() {
   const user = await (await api('/api/auth/me')).json();
   currentUser = user.username;
+  csrfToken = user.csrf_token || '';
+  signedIn = true;
   $('login-panel').hidden = true;
   $('layout').hidden = false;
   $('lg-btn').disabled = false;
   await showPage('dashboard');
-  const jid = localStorage.getItem('lead_engine_job_' + currentUser);
   const jobs = await loadJobs();
   const resume = jobs.find(job => ['queued', 'running'].includes(job.status));
-  if (jid || resume) void pollJob(jid || resume.id);
+  if (resume) void pollJob(resume.id);
 }
 
 async function loadSettings() {
@@ -283,6 +288,10 @@ async function loadSettings() {
   try {
     const settings = await (await api('/api/config')).json();
     $('settings-status').textContent = `Concurrent jobs: ${settings.max_concurrent_tasks}. Outreach and public sending are disabled.`;
+    if (settings.editable === false) {
+      $('settings-status').textContent += ' Provider settings are managed by the operator.';
+      return;
+    }
     const nodes = [];
     for (const [key, configured] of Object.entries(settings.providers)) {
       const group = document.createElement('div');
@@ -307,8 +316,9 @@ $('login-form').addEventListener('submit', async event => {
   const button = event.currentTarget.querySelector('button'); button.disabled = true;
   try {
     const response = await api('/api/auth/login', {method: 'POST', body: JSON.stringify({username: $('username').value, password: $('password').value})});
-    token = (await response.json()).access_token;
-    localStorage.setItem('lead_engine_token', token);
+    const session = await response.json();
+    if (authMode === 'legacy-development') token = session.access_token;
+    else csrfToken = session.csrf_token;
     $('password').value = '';
     await enterWorkspace();
   } catch (error) { $('login-error').textContent = error.message; }
@@ -330,7 +340,6 @@ $('leadgen-form').addEventListener('submit', async event => {
   $('lg-btn').disabled = true;
   try {
     const data = await (await api('/api/leadgen/start', {method: 'POST', body: JSON.stringify(body)})).json();
-    localStorage.setItem('lead_engine_job_' + currentUser, data.job_id);
     void pollJob(data.job_id);
   } catch (error) {
     $('lg-btn').disabled = false;
@@ -363,6 +372,27 @@ $('password-form').addEventListener('submit', async event => {
     await api('/api/auth/change-password', {method: 'POST', body: JSON.stringify({old_password: $('old-password').value, new_password: $('new-password').value})});
     $('old-password').value = ''; $('new-password').value = '';
     $('password-status').textContent = 'Password updated.';
+    if (authMode === 'cookie') {
+      clearSession();
+      $('login-error').textContent = 'Password updated. Sign in again.';
+    }
   } catch (error) { $('password-status').textContent = error.message; }
 });
-if (token) enterWorkspace().catch(error => { logout(); $('login-error').textContent = error.message; });
+async function logout() {
+  try {
+    if (authMode === 'cookie' && signedIn) await api('/api/auth/logout', {method: 'POST'});
+    clearSession();
+  } catch (error) { showError(error); }
+}
+
+async function initializeAuthentication() {
+  const response = await fetch('/api/auth/mode', {credentials: 'same-origin'});
+  if (!response.ok) throw new Error('Authentication configuration unavailable.');
+  const mode = await response.json();
+  authMode = mode.production === false && mode.mode === 'legacy-development' ? 'legacy-development' : 'cookie';
+  if (authMode === 'cookie') {
+    try { await enterWorkspace(); }
+    catch (error) { clearSession(); if (error.status !== 401) $('login-error').textContent = error.message; }
+  }
+}
+initializeAuthentication().catch(error => { $('login-error').textContent = error.message; });

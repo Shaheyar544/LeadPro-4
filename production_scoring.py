@@ -1,9 +1,23 @@
-"""Production scoring independent of persisted Google ratings/reviews."""
-VERSION='website_conversion_v2'
-CORE=('contact_form','quote_form','booking_form','contact_page','primary_cta','click_to_call','mobile_layout')
+"""Production v2 uses only independently observed browser evidence."""
+from audit_engine.detectors import aggregate
+VERSION = 'website_conversion_v2'
+CORE = ('contact_form', 'quote_form', 'booking_form', 'contact_page', 'primary_cta', 'click_to_call', 'mobile_layout')
+
 def score_browser_evidence(audit):
- f=audit.get('findings',{}) if isinstance(audit,dict) else {}
- present=sum(1 for k in CORE if (f.get(k,{}).get('status')=='present' or f.get(k,{}).get('value') is True))
- unknown=sum(1 for k in CORE if f.get(k,{}).get('status') in ('unknown','blocked','failed'))
- gap=round(max(0.0,1-present/len(CORE)),4); conf=round((len(CORE)-unknown)/len(CORE),4)
- return {'profile_version':VERSION,'opportunity_score':round(gap*conf*100,2),'digital_gap':gap,'business_strength':None,'evidence_confidence':conf,'contact_confidence':conf,'breakdown':{'findings':f,'source':'browser_evidence_only'}}
+    supplied = audit.get('findings', {}) if isinstance(audit, dict) else {}
+    if 'evidence' in audit:
+        supplied = aggregate(audit['evidence'], audit.get('status') == 'completed')
+    # Only allowlisted detector findings may enter a score.
+    findings = {k: {p: v for p, v in supplied.get(k, {'status': 'unknown'}).items()
+                    if p in {'status', 'confidence', 'evidence_ids'}}
+                for k in CORE}
+    assessed = sum(f['status'] in ('present', 'absent') for f in findings.values())
+    absent = sum(f['status'] == 'absent' for f in findings.values())
+    confidence = round(100 * assessed / len(CORE), 2)
+    gap = round(100 * absent / assessed, 2) if assessed >= 3 else None
+    return {'profile_version': VERSION, 'opportunity_score': gap, 'digital_gap': gap,
+            'business_strength': None, 'evidence_confidence': confidence,
+            'contact_confidence': round(100 * max((c.get('confidence', 0) for c in audit.get('contacts', [])), default=0), 2),
+            'breakdown': {'findings': findings, 'source': 'browser_evidence_only',
+                          'formula': '100 * absent / assessed (minimum 3 assessed checks)',
+                          'components': [], 'fallback': 'insufficient_assessable_evidence' if gap is None else None}}

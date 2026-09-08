@@ -8,6 +8,12 @@ audits/
 reports/
 __pycache__/
 .env
+.env.*
+!.env.production.example
+.local-integration/
+*.dump
+*.backup
+pgdata/
 *.pyc
 .DS_Store
 backup_old/

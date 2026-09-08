@@ -3,6 +3,9 @@ LeadPro v4 — Web Server
 FastAPI: REST + SSE + tracking + audit pages.
 """
 from __future__ import annotations
+import os
+if os.getenv('APP_ENV') == 'production':
+    raise RuntimeError('Production must use lead_engine.api; legacy SQLite entrypoint is disabled')
 import asyncio, json, uuid, base64, os, aiohttp, time, logging, re
 from urllib.parse import urlparse
 from pathlib import Path
@@ -257,6 +260,11 @@ async def change_password(request: Request, body: ChangePasswordRequest,
     with get_conn() as conn:
         conn.execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, row["id"]))
     return {"ok": True}
+
+
+@app.get("/api/auth/mode")
+def auth_mode():
+    return {"mode": "legacy-development", "production": False}
 
 
 @app.get("/api/auth/me")

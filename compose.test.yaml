@@ -1,0 +1,15 @@
+services:
+  integration:
+    image: leadpro-phase4a2:test
+    environment:
+      APP_ENV: local
+      DATABASE_URL: postgresql+psycopg://leadpro:${POSTGRES_PASSWORD:?required}@postgres:5432/phase4a2_tests
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${SESSION_SECRET:?required}
+      RUN_POSTGRES_TESTS: "1"
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:?required}
+      PYTHONPATH: /app
+    networks: [data]
+    tmpfs: [/tmp]
+    command: python -m pytest -q -o cache_dir=/tmp/pytest_cache
+    profiles: [test]
